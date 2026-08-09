@@ -346,8 +346,8 @@ function inst() {
         if (_.sdOk && !(s.vers < 4.2)) {
             rVc();
         } else {
-            print(_.pId, "New Virtual Component installation");
-            gVc();
+            print(_.pId, "SystemData is missing or outdated; checking existing Virtual Components.");
+            rVc({ recover: true });
         }
     } else {
         print(_.pId, "Script in KVS mode");
@@ -464,9 +464,11 @@ function sGrp() {
 // Read every page of this script's Virtual Components and commit only a complete value set.
 function rVc(state) {
     if (!state || typeof state !== "object" || !state.map) {
+        const recover = state && state.recover === true;
         cntr++;
         state = {
             offset: 0,
+            recover: recover,
             map: [
                 ["tPer", "enum:200", null, false],
                 ["hTim", "number:200", null, false],
@@ -510,19 +512,25 @@ function rVc(state) {
             rVc(data);
             return;
         }
-        let isOk = true;
+        let found = 0;
         for (let i = 0; i < data.map.length; i++) {
-            if (!data.map[i][3]) { isOk = false; break; }
+            if (data.map[i][3]) { found++; }
         }
+        const isOk = found === data.map.length;
         if (isOk) {
             for (let i = 0; i < data.map.length; i++) { c[data.map[i][0]] = data.map[i][2]; }
         }
         cntr--;
         if (isOk) {
-            print(_.pId, "Virtual Component mode active");
+            print(_.pId, data.recover ? "Virtual Component mode recovered from existing controls." : "Virtual Component mode active");
             main();
+        } else if (data.recover && found === 0) {
+            print(_.pId, "No existing heating controls found; starting a new Virtual Component installation.");
+            gVc();
         } else {
-            print(_.pId, "Virtual Component controls are unavailable or incomplete.");
+            print(_.pId, data.recover ?
+                "Virtual Component recovery is incomplete or ambiguous. Restore all heating controls, or remove reserved IDs and restart to reinstall. Existing components were left unchanged." :
+                "Virtual Component controls are unavailable or incomplete.");
             print(_.pId, "Using KVS mode for this run.");
             tKvs();
         }
@@ -620,22 +628,16 @@ function gFcs() {
 function gEle() {
     // set the date range for Elering query
     const epch = Shelly.getComponentStatus("sys").unixtime;
-    let stDt = new Date(epch * 1000);
-    const shHr = stDt.getHours();
+    const shHr = new Date(epch * 1000).getHours();
     // After 23:00 tomorrow's energy prices are used
     // before 23:00 today's energy prices are used.
-    stDt.setHours(0, 0, 0, 0);
-    if (shHr >= 23) {
-        stDt.setDate(stDt.getDate() + 1);
-    }
-    let enDt = new Date(stDt.getTime());
-    enDt.setDate(enDt.getDate() + 1);
-    const epSt = Math.floor(stDt.getTime() / 1000);
-    const epEn = Math.floor(enDt.getTime() / 1000);
+    const day = shHr >= 23 ? 1 : 0;
+    const epSt = lMid(epch, day);
+    const epEn = lMid(epch, day + 1);
     const qExp = Math.floor((epEn - epSt) / (15 * 60));
-    const dtSt = stDt.toISOString().slice(0, 19) + "Z";
+    const dtSt = new Date(epSt * 1000).toISOString().slice(0, 19) + "Z";
     // Elering includes the end timestamp, so request the final quarter instead of next midnight.
-    const dtEn = new Date(enDt.getTime() - 15 * 60 * 1000).toISOString().slice(0, 19) + "Z";
+    const dtEn = new Date((epEn - 15 * 60) * 1000).toISOString().slice(0, 19) + "Z";
     // Build Elering URL
     let url = "https://dashboard.elering.ee/api/nps/price/csv?fields=";
     url += c.cnty + "&start=" + dtSt + "&end=" + dtEn;
@@ -771,11 +773,19 @@ function gTz(epoch) {
     const ts = epoch === undefined ? Shelly.getComponentStatus("sys").unixtime : epoch;
     const shDt = new Date(ts * 1000);
     const shHr = shDt.getHours();
-    const utcH = shDt.toISOString().slice(11, 13);  //UTC hour
-    let tz = shHr - utcH;                           //timezone offset
+    const utcH = Number(shDt.toISOString().slice(11, 13));
+    let tz = shHr - utcH;
     if (tz > 12) { tz -= 24; }
     if (tz < -12) { tz += 24; }
     return tz * 60 * 60;
+}
+
+// UTC epoch of local midnight, addD local days from the supplied epoch.
+function lMid(epoch, addD) {
+    const day = Math.floor((epoch + gTz(epoch)) / (24 * 60 * 60)) + addD;
+    let mid = day * 24 * 60 * 60 - gTz(day * 24 * 60 * 60);
+    mid = day * 24 * 60 * 60 - gTz(mid);
+    return mid;
 }
 
 // Calculate transfer fee based on the timestamp.

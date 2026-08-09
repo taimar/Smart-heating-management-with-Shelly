@@ -15,6 +15,14 @@ let FIXED_MS = new RealDate(EVE.normal).getTime();
 class Date extends RealDate {
     constructor(...a) { a.length === 0 ? super(FIXED_MS) : super(...a); }
     static now() { return FIXED_MS; }
+    setHours(...a) {
+        if (W && W.noDateMutation) throw new Error("Date.setHours unavailable");
+        return super.setHours(...a);
+    }
+    setDate(...a) {
+        if (W && W.noDateMutation) throw new Error("Date.setDate unavailable");
+        return super.setDate(...a);
+    }
 }
 
 // ---- world ----
@@ -206,6 +214,7 @@ t.fcTm();
 for (const [name, eve] of [["spring 23h", EVE.spring], ["autumn 25h", EVE.autumn]]) {
     FIXED_MS = new RealDate(eve).getTime();
     W = freshWorld();
+    W.noDateMutation = true; //models a Shelly engine without mutating Date methods
     W.kvs["SmartHeatingConf1"] = conf();
     W.http = priceServer(PRICE);
     t = boot();
@@ -213,12 +222,28 @@ for (const [name, eve] of [["spring 23h", EVE.spring], ["autumn 25h", EVE.autumn
     const inDay = new RealDate(new RealDate(eve).getTime() + 3600 * 1000); // inside the target day
     const d0 = new RealDate(inDay.getFullYear(), inDay.getMonth(), inDay.getDate(), 0, 0, 0).getTime();
     const d1 = new RealDate(inDay.getFullYear(), inDay.getMonth(), inDay.getDate() + 1, 0, 0, 0).getTime();
-    const mSt = W.lastUrl.match(/start=([^&]+)/), mEn = W.lastUrl.match(/end=([^&]+)/);
-    const rSt = RealDate.parse(decodeURIComponent(mSt[1])), rEn = RealDate.parse(decodeURIComponent(mEn[1]));
-    check("S4 " + name + " window starts at local midnight", rSt === d0, W.lastUrl);
-    check("S4 " + name + " window ends at next local midnight", rEn === d1 || rEn === d1 - 900 * 1000, W.lastUrl);
+    const mSt = W.lastUrl && W.lastUrl.match(/start=([^&]+)/), mEn = W.lastUrl && W.lastUrl.match(/end=([^&]+)/);
+    const rSt = mSt ? RealDate.parse(decodeURIComponent(mSt[1])) : NaN;
+    const rEn = mEn ? RealDate.parse(decodeURIComponent(mEn[1])) : NaN;
+    check("S4 " + name + " window starts at local midnight without Date mutation", !t.err && rSt === d0, [String(t.err || ""), W.lastUrl]);
+    check("S4 " + name + " window ends at next local midnight without Date mutation", !t.err && (rEn === d1 || rEn === d1 - 900 * 1000), [String(t.err || ""), W.lastUrl]);
     const got = specHours(W.schedules[0] && W.schedules[0].timespec);
     check("S4 " + name + " cheapest real hours, no duplicates", got === cheapest(eve, 24, 10, PRICE), got);
+}
+
+FIXED_MS = new RealDate("2026-01-13T22:30:00+02:00").getTime();
+W = freshWorld();
+W.noDateMutation = true;
+W.kvs["SmartHeatingConf1"] = conf();
+W.http = priceServer(PRICE);
+t = boot();
+t.fcTm();
+{
+    const mSt = W.lastUrl && W.lastUrl.match(/start=([^&]+)/);
+    const rSt = mSt ? RealDate.parse(decodeURIComponent(mSt[1])) : NaN;
+    const today = new RealDate("2026-01-13T00:00:00+02:00").getTime();
+    check("S4 before 23:00 uses the current local day without Date mutation",
+        !t.err && rSt === today && W.schedules.length === 1, [String(t.err || ""), W.lastUrl]);
 }
 FIXED_MS = new RealDate(EVE.normal).getTime();
 
@@ -313,7 +338,44 @@ t.loop();
 check("S7b transient VC read never yields a defaults schedule", !everDefault && finalOk, W.schedules.map(s => s.timespec));
 }
 
-// S7c. Local RPC failures must leave the last working schedule intact and retry later.
+// S7c. Missing SystemData must recover a complete VC configuration immediately,
+// install only when no reserved controls exist, and leave partial sets untouched.
+W = freshWorld();
+W.device = { gen: 3, app: "Mini1G3", ver: "1.4.4" };
+W.vcs = VC_SET.map(e => ({ key: e[0], config: { name: e[1] }, status: { value: e[2] } }));
+W.http = priceServer(PRICE);
+t = boot();
+t.fcTm();
+check("S7c missing SystemData: complete controls recover immediately",
+    W.schedules.length === 1 && specHours(W.schedules[0].timespec) === cheapest(EVE.normal, 12, 5, PRICE),
+    W.schedules.map(s => s.timespec));
+check("S7c missing SystemData: recovery neither adds nor deletes controls",
+    W.vcs.length === VC_SET.length && W.vDeleted.length === 0, [W.vcs.length, W.vDeleted]);
+
+W = freshWorld();
+W.device = { gen: 3, app: "Mini1G3", ver: "1.4.4" };
+W.http = priceServer(PRICE);
+t = boot();
+t.fcTm();
+check("S7c missing SystemData: empty reserved slots install controls",
+    W.vcs.length === VC_SET.length && W.vDeleted.length === 0 && W.schedules.length === 1,
+    [W.vcs.length, W.vDeleted, W.schedules.length]);
+
+W = freshWorld();
+W.device = { gen: 3, app: "Mini1G3", ver: "1.4.4" };
+W.vcs = [{ key: "enum:200", config: { name: "Heating Period (h)" }, status: { value: "12" } }];
+W.http = priceServer(PRICE);
+const partialLogStart = prints.length;
+t = boot();
+t.fcTm();
+check("S7c missing SystemData: partial controls are left untouched",
+    W.vcs.length === 1 && W.vDeleted.length === 0 && W.schedules.length === 1,
+    [W.vcs.length, W.vDeleted, W.schedules.length]);
+check("S7c missing SystemData: ambiguous recovery is explained",
+    prints.slice(partialLogStart).some(line => /incomplete|partial|ambiguous/i.test(line)),
+    prints.slice(partialLogStart));
+
+// S7d. Local RPC failures must leave the last working schedule intact and retry later.
 function preservesSchedule(name, method) {
     W = freshWorld();
     W.kvs["SmartHeatingConf1"] = conf();
@@ -328,7 +390,7 @@ function preservesSchedule(name, method) {
     delete W.fail[method];
     t.loop();
     const replaced = W.schedules.length === 1 && W.schedules[0].id !== oldId && W.deleted.indexOf(oldId) !== -1;
-    check("S7c " + name + " preserves then replaces the working schedule", preserved && replaced,
+    check("S7d " + name + " preserves then replaces the working schedule", preserved && replaced,
         [W.schedules.map(s => s.id), W.deleted]);
 }
 preservesSchedule("relay timer failure", "Switch.SetConfig");
@@ -341,7 +403,7 @@ W.kvs["SmartHeatingSys1"] = JSON.stringify({ LastCalculation: 0, ExistingSchedul
 W.http = priceServer(PRICE);
 t = boot();
 t.fcTm();
-check("S7c stale schedule id is recovered", W.schedules.length === 1 && W.schedules[0].id === 5, W.schedules);
+check("S7d stale schedule id is recovered", W.schedules.length === 1 && W.schedules[0].id === 5, W.schedules);
 
 // S8. Components this script did not create are never deleted.
 for (const [name, comps] of [

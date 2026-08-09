@@ -182,10 +182,10 @@ Please check the details in this [Elektrilevi page](https://elektrilevi.ee/en/vo
 |``NONE``|Network fee is set to 0 and it will not taken into account.||
 
 #### ``"AlwaysOnPrice": 10``
-Keep heating always on if the electricity market price lower than this value (EUR/MWh).
+Market prices are rounded to two decimal places before threshold comparison. Keep heating on when the rounded electricity market price is at or below this value (EUR/MWh), unless ``AlwaysOffPrice`` also applies.
 
 #### ``"AlwaysOffPrice": 300``
-Keep heating always OFF if electricity market price higher than this value (EUR/MWh).
+Keep heating OFF when the rounded electricity market price is at or above this value (EUR/MWh). This threshold takes precedence if both thresholds apply.
 
 #### ``"InvertedRelay": false``
 Configures the relay state to either normal or inverted.

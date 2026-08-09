@@ -175,10 +175,10 @@ Elektrilevi või Imatra elektri ülekandetasude pakett. Valikus on VORK1, VORK2,
 | ``NONE`` | Võrgutasu on 0 ||
 
 #### ``"AlwaysOnPrice": 10``
-Küte on igal juhul sees, kui börsihind on sellest väärtusest madalam (EUR/MWh). 
+Enne lävenditega võrdlemist ümardatakse börsihind kahe komakohani. Küte on sees, kui ümardatud börsihind on sellest väärtusest väiksem või sellega võrdne (EUR/MWh), välja arvatud juhul, kui rakendub ka ``AlwaysOffPrice``.
 
 #### ``"AlwaysOffPrice": 300``
-Küte on igal juhul väljas, kui börsihind ületab selle väärtuse (EUR/MWh). 
+Küte on väljas, kui ümardatud börsihind on sellest väärtusest suurem või sellega võrdne (EUR/MWh). Kui mõlemad lävendid rakenduvad, on ``AlwaysOffPrice`` prioriteetne.
 
 #### ``"InvertedRelay": false``
 Konfigureerib relee oleku kas normaalseks või pööratud.

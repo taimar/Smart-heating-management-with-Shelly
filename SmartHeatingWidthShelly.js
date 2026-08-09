@@ -112,7 +112,7 @@ let _ = {
     scId: '',       //schedule ID
     manu: false,    //manual heating flag
     prov: "None",   //network provider name
-    newV: 4.9,      //new script version
+    newV: 5.0,      //new script version
     sdOk: false,    //system data OK
     cdOk: false,    //configuration data OK
 };
@@ -328,7 +328,6 @@ function gKvs() {
 function inst() {
     if (isVC()) {
         if (_.sdOk && !(s.vers < 4.2)) {
-            print(_.pId, "Existing Virtual Component mode");
             rVc();
         } else {
             print(_.pId, "New Virtual Component installation");
@@ -354,44 +353,28 @@ function tKvs() {
     main();
 }
 
-// Get all virtual components and delete them all before new installation
+// Install Virtual Components only when this script's reserved component keys are free.
 function gVc() {
-    Shelly.call("Shelly.GetComponents", { dynamic_only: true, include: ["status"] }, function (res, err, msg) {
-        if (err === 0) {
-            if (res.components && res.components.length > 0) {
-                dVc(res.components); // Delete all Virtual Components
-            } else {
-                aVc(dtVc()); // Add VCom and pass Virtual Components data
-            }
-        } else {
+    Shelly.call("Shelly.GetComponents", {
+        dynamic_only: true,
+        keys: ["group:200", "enum:200", "number:200", "enum:201", "number:201", "number:202", "boolean:201", "enum:202", "boolean:200", "number:203"]
+    }, function (res, err, msg) {
+        if (err !== 0 || !res) {
             print(_.pId, "Failed to get virtual components: " + msg);
+            print(_.pId, "Using KVS mode for this run.");
+            tKvs();
+            return;
+        }
+
+        // Treat an incomplete response conservatively: never overwrite or delete existing components.
+        if (res.total !== 0) {
+            print(_.pId, "Reserved virtual component slots are already in use or could not be counted. Existing components were left unchanged.");
+            print(_.pId, "Using KVS mode for this run.");
+            tKvs();
+        } else {
+            aVc(dtVc());
         }
     });
-}
-
-// Delete all virtual components for new installation only
-function dVc(vCom) {
-    if (cntr < 6 - 1) {
-        for (let i = 0; i < 1 && i < vCom.length; i++) {
-            let key = vCom.splice(0, 1)[0].key;
-            cntr++;
-            Shelly.call("Virtual.Delete", { key: key },
-                function (res, err, msg) {
-                    if (err === 0) {
-                        print(_.pId, "Clean Virtual Components");
-                    } else {
-                        print(_.pId, "Virtual component is not deleted: " + msg);
-                    }
-                    cntr--;
-                }
-            );
-        }
-    }
-    if (vCom.length > 0) {
-        Timer.set(1000, false, dVc, vCom);
-    } else {
-        wait([aVc, dtVc()]);
-    }
 }
 
 // Add all new virtual components
@@ -457,30 +440,53 @@ function rVc() {
         ["cnty", "enum:202"],
         ["hCur", "number:203"],
     ];
-    Shelly.call("Shelly.GetComponents", { dynamic_only: true, include: ["status"] },
-        function (res, err) {
-            if (err === 0) {
-                let comp = res.components;
-                res = null;
-                if (comp && comp.length > 0) {
-                    for (let i = 0; i < mpVC.length; i++) {
-                        for (let j = 0; j < comp.length; j++) {
-                            if (mpVC[i][1] === comp[j].key) {
-                                c[mpVC[i][0]] = comp[j].status.value;
-                                break;
-                            }
+    let vKey = [];
+    for (let i = 0; i < mpVC.length; i++) { vKey.push(mpVC[i][1]); }
+    Shelly.call("Shelly.GetComponents", { dynamic_only: true, keys: vKey, include: ["status"] },
+        function (res, err, msg) {
+            let comp = err === 0 && res ? res.components : null;
+            let isOk = !!(err === 0 && res && comp);
+            if (isOk) {
+                for (let i = 0; i < mpVC.length; i++) {
+                    let found = false;
+                    for (let j = 0; j < comp.length; j++) {
+                        if (mpVC[i][1] === comp[j].key && comp[j].status && comp[j].status.value !== undefined) {
+                            mpVC[i][2] = comp[j].status.value;
+                            found = true;
+                            break;
                         }
                     }
-
+                    if (!found) {
+                        isOk = false;
+                        break;
+                    }
                 }
             }
+            if (isOk) {
+                for (let i = 0; i < mpVC.length; i++) { c[mpVC[i][0]] = mpVC[i][2]; }
+            }
+            res = null;
+            comp = null;
+            mpVC = null;
+            vKey = null;
             cntr--;
+            if (isOk) {
+                print(_.pId, "Virtual Component mode active");
+                main();
+            } else {
+                print(_.pId, "Virtual Component controls are unavailable or incomplete" + (msg ? ": " + msg : "") + ".");
+                print(_.pId, "Using KVS mode for this run.");
+                tKvs();
+            }
         });
-    wait(main);
 }
 
 // Main script where all the logic starts.
 function main() {
+    if (typeof c.pack !== "string") {
+        rErr("Configuration data unavailable; retrying.");
+        return;
+    }
     _.cPer = c.tPer <= 0 ? 0 : Math.ceil((24 * 100) / (c.tPer * 100));  //number of periods in a day
     _.hTim = c.hTim > c.tPer ? c.tPer : c.hTim;                         //heating time can't be more than the period
     //check if Shelly has time
@@ -537,8 +543,10 @@ function gFcs() {
         let fcTm = ((maxT - tFcs) * (c.pFac - 1) + (maxT - tFcs + c.hCur * 2 - 2)); //the main heating time calculation algorithm
         fcTm = fcTm < 0 || tFcs > maxT ? 0 : fcTm;  //heating time can't be negative
         _.hTim = Math.floor(fcTm / _.cPer);         //heating time per period (round-down heating time)
+        if (fcTm > 0 && _.hTim < c.hTim) {
+            _.hTim = c.hTim;                       //apply minimum only when heating demand exists
+        }
         _.hTim = _.hTim > c.tPer ? c.tPer : _.hTim; //heating time can't be more than the period
-        // _.hTim = _.hTim < c.hTim ? c.hTim : _.hTim; //heating time can't be less than the user setting 
 
         print(_.pId, "Temperture forecast width windchill is ", tFcs, " °C, and heating enabled for ", _.hTim, " hours.");
         gEle();
@@ -548,14 +556,22 @@ function gFcs() {
 function gEle() {
     // set the date range for Elering query
     const epch = Shelly.getComponentStatus("sys").unixtime;
-    const shHr = new Date(epch * 1000).getHours();
+    let stDt = new Date(epch * 1000);
+    const shHr = stDt.getHours();
     // After 23:00 tomorrow's energy prices are used
     // before 23:00 today's energy prices are used.
-    const addD = shHr >= 23 ? 0 : -1;
-    const isoT = new Date((epch + gTz() + 60 * 60 * 24 * addD) * 1000).toISOString().slice(0, 10);
-    const isoN = new Date((epch + gTz() + (60 * 60 * 24 * (addD + 1))) * 1000).toISOString().slice(0, 10);
-    const dtSt = isoT + "T" + (24 - gTz() / 3600) + ":00Z";
-    const dtEn = isoN + "T" + (24 - gTz() / 3600) + ":00Z";
+    stDt.setHours(0, 0, 0, 0);
+    if (shHr >= 23) {
+        stDt.setDate(stDt.getDate() + 1);
+    }
+    let enDt = new Date(stDt.getTime());
+    enDt.setDate(enDt.getDate() + 1);
+    const epSt = Math.floor(stDt.getTime() / 1000);
+    const epEn = Math.floor(enDt.getTime() / 1000);
+    const qExp = Math.floor((epEn - epSt) / (15 * 60));
+    const dtSt = stDt.toISOString().slice(0, 19) + "Z";
+    // Elering includes the end timestamp, so request the final quarter instead of next midnight.
+    const dtEn = new Date(enDt.getTime() - 15 * 60 * 1000).toISOString().slice(0, 19) + "Z";
     // Build Elering URL
     let url = "https://dashboard.elering.ee/api/nps/price/csv?fields=";
     url += c.cnty + "&start=" + dtSt + "&end=" + dtEn;
@@ -567,17 +583,20 @@ function gEle() {
             hErr("Elering HTTP.GET error, check again in " + _.freq / 60 + " min.");
             return;
         }
-        c.pack = eval("pack()." + c.pack);      //convert transfer fee to variable and load the data
+        let p = pack()[c.pack]; //load the selected transfer fee without replacing the configuration value
+        if (!p) {
+            rErr("Unknown network package: " + c.pack + ".");
+            return;
+        }
 
-        res.body_b64 = atob(res.body_b64);                                  //decode base64 to text
-        let body = res.body_b64.substring(res.body_b64.indexOf("\n") + 1);  //skip the first line
+        let body = atob(res.body_b64); //decode base64 to text
         res = null;
         let raw = [];
         let eler = [];
-        let aPos = 0;
-        while (aPos >= 0) {
-            body = body.substring(aPos);
-            aPos = 0;
+        let aPos = body.indexOf("\n"); //skip the header without copying the response string
+        let qCnt = 0;
+        if (aPos >= 0) { aPos++; }
+        while (aPos >= 0 && aPos < body.length) {
             let row = [0, 0];
             aPos = body.indexOf("\"", aPos) + 1;
             if (aPos === 0) {
@@ -592,24 +611,30 @@ function gEle() {
             while (hr === hr15 && hr15 < 24)          //sum 1 hour prices
             {
                 avg++;
+                qCnt++;
                 aPos = body.indexOf(";\"", aPos) + 2; //skip ;
                 aPos = body.indexOf(";\"", aPos) + 2; //find price
                 pric += Number(body.substring(aPos, body.indexOf("\"", aPos)).replace(",", "."));
 
-                aPos = body.indexOf("\n", aPos);        //next line
+                aPos = body.indexOf("\n", aPos); //next line
+                if (aPos < 0) {
+                    aPos = body.length;
+                    break; // EOF
+                }
                 let nxt = body.indexOf("\"", aPos) + 1; //next epoch
                 if (nxt === 0) {
+                    aPos = body.length;
                     break; // EOF
                 }
                 hr15 = new Date(Number(body.substring(nxt, body.indexOf("\"", nxt))) * 1000).getHours(); //next hour
             }
 
             row[1] = Math.round((pric / avg) * 100) / 100;  //avg price for the hour, round 2 dec places
-            row[1] += fFee(row[0]);                         //add transfer fee
+            row[1] += fFee(row[0], p);                      //add transfer fee
             raw.push(row);
         }
-        //if elering API returns less than 24 rows, the script will try to download the data again after set of minutes
-        if (raw.length < 24) {
+        // Check all expected quarters; local days contain 23, 24 or 25 hours around DST changes.
+        if (qCnt !== qExp || raw.length === 0) {
             hErr("Elering API didn't return prices, check again in " + _.freq / 60 + " min.");
             return;
         }
@@ -622,14 +647,17 @@ function gEle() {
             for (let a = 0; a < raw.length; a++) {
                 let ts = raw[a][0];
                 let pric = raw[a][1];
-                let fee = fFee(ts);
-                if (pric - fee < c.lowR) { //if price - transferFee is less than min price
+                let fee = fFee(ts, p);
+                let mPric = Math.round((pric - fee) * 100) / 100;
+                let forceOn = mPric <= c.lowR;
+                let forceOff = mPric >= c.higR;
+                if (forceOn && !forceOff) {
                     eler.push([new Date(ts * 1000).getHours(), pric]);
-                    print(_.pId, "Energy price ", pric - fee, " EUR/MWh at ", new Date(ts * 1000).getHours() + ":00 is less than min price and used for heating.");
+                    print(_.pId, "Energy price ", mPric, " EUR/MWh at ", new Date(ts * 1000).getHours() + ":00 is at or below min price and used for heating.");
                 }
             }
             if (!eler.length) {
-                print(_.pId, "No energy prices below min price level. No heating.");
+                print(_.pId, "No energy prices at or below min price level. No heating.");
             }
         } else {    // Calculate schedules based on the cheap hours in the heating period.
             let numP = Math.ceil((new Date().getHours() % 23 + 2) / c.tPer);    //finds the current period for forecast calculation    
@@ -639,8 +667,11 @@ function gEle() {
                 if (c.isFc && (i + 1) != numP) { continue; }                //use only the current period in case of forecast, skip the rest
                 let hPer = (i + 1) * c.tPer > 24 ? 24 : (i + 1) * c.tPer;   //finds the end of the period
                 let oneP = [];
-                for (let j = i * c.tPer; j < hPer; j++) {                   //finds the prices in the period
-                    oneP.push(raw[j]);                                      //copy the price to the new array
+                for (let j = 0; j < raw.length; j++) {                      //find prices by local hour (DST-safe)
+                    let rHr = new Date(raw[j][0] * 1000).getHours();
+                    if (rHr >= i * c.tPer && rHr < hPer) {
+                        oneP.push(raw[j]);
+                    }
                 }
                 oneP = srAr(oneP, 1); //sort by price
                 let hHrs = oneP.length < _.hTim ? oneP.length : _.hTim;     //finds max hours to heat in that period 
@@ -648,8 +679,11 @@ function gEle() {
                 for (let a = 0; a < oneP.length; a++) {
                     let ts = oneP[a][0];
                     let pric = oneP[a][1];
-                    let fee = fFee(ts);
-                    if ((a < hHrs || pric - fee < c.lowR) && !(pric - fee > c.higR)) {
+                    let fee = fFee(ts, p);
+                    let mPric = Math.round((pric - fee) * 100) / 100;
+                    let forceOn = mPric <= c.lowR;
+                    let forceOff = mPric >= c.higR;
+                    if (!forceOff && (a < hHrs || forceOn)) {
                         eler.push([new Date((ts) * 1000).getHours(), pric]);
                     }
                 }
@@ -658,17 +692,19 @@ function gEle() {
                 print(_.pId, "Current configuration does not permit heating during any hours; it is likely that the AlwaysOffPrice value is set too low.")
             }
         }
-        c.pack, raw = null;
+        p = null;
+        raw = null;
+        body = null;
         _.manu = false;
-        fTmr();     //set default timer
-        fdSc(eler); //delete existing schedule and pass eler data to create schedule
+        fTmr(eler); //set the fail-safe timer before replacing the existing schedule
         eler = null;
     });
 }
 
 // Get Shelly timezone offset in seconds 
-function gTz() {
-    const shDt = new Date(Shelly.getComponentStatus("sys").unixtime * 1000);
+function gTz(epoch) {
+    const ts = epoch === undefined ? Shelly.getComponentStatus("sys").unixtime : epoch;
+    const shDt = new Date(ts * 1000);
     const shHr = shDt.getHours();
     const utcH = shDt.toISOString().slice(11, 13);  //UTC hour
     let tz = shHr - utcH;                           //timezone offset
@@ -678,51 +714,51 @@ function gTz() {
 }
 
 // Calculate transfer fee based on the timestamp.
-function fFee(epoch) {
+function fFee(epoch, p) {
     const hour = new Date(epoch * 1000).getHours();
     const day = new Date(epoch * 1000).getDay();
     const mnth = new Date(epoch * 1000).getMonth();
     if (_.prov === "Elektlevi") {
         if ((mnth >= 10 || mnth <= 2) && (day === 0 || day === 6) && hour >= 16 && hour < 20) {
             // peak holiday: Nov-Mar, SA-SU at 16:00–20:00
-            return c.pack.hMRt;
-        } else if ((mnth >= 10 || mnth <= 2) && ((hour >= 9 && hour < 12) || (hour >= 16 && hour < 20))) {
+            return p.hMRt;
+        } else if ((mnth >= 10 || mnth <= 2) && day !== 0 && day !== 6 && ((hour >= 9 && hour < 12) || (hour >= 16 && hour < 20))) {
             // peak daytime: Nov-Mar: MO-FR at 09:00–12:00 and at 16:00–20:00
-            return c.pack.dMRt;
+            return p.dMRt;
         } else if (hour < 7 || hour >= 22 || day === 6 || day === 0) {
             //night-time: MO-FR at 22:00–07:00, SA-SU all day
-            return c.pack.nRt;
+            return p.nRt;
         } else {
             //daytime: MO-FR at 07:00–22:00
-            return c.pack.dRt;
+            return p.dRt;
         }
     } else if (_.prov === "Imatra") {
-        if (gTz() / 60 / 60 === 3) { //summer time
+        if (gTz(epoch) / 60 / 60 === 3) { //summer time
             if (hour < 8 || day === 6 || day === 0) {
                 //summer-night-time: MO-FR at 00:00–08:00, SA-SU all day
-                return c.pack.nRt;
+                return p.nRt;
             } else {
                 //daytime: MO-FR at 08:00–24:00
-                return c.pack.dRt;
+                return p.dRt;
             }
         } else {
             if (hour < 7 || hour >= 23 || day === 6 || day === 0) {
                 //winter-night-time: MO-FR at 23:00–07:00, SA-SU all day
-                return c.pack.nRt;
+                return p.nRt;
             } else {
                 //daytime: MO-FR at 07:00–23:00
-                return c.pack.dRt;
+                return p.dRt;
             }
         }
     } else if (_.prov === "Lv") {
-        return c.pack.dRt;
+        return p.dRt;
     } else {
         return 0;
     }
 }
 
 // Set countdown timer to flip Shelly status
-function fTmr() {
+function fTmr(eler) {
     const timr = c.tmr * 60 + 10; //+10sec to remove flap between continous heating hours
     Shelly.call("Switch.SetConfig", {
         id: c.rId,
@@ -732,20 +768,51 @@ function fTmr() {
             auto_off: !c.Inv,
             auto_off_delay: timr
         }
-    });
+    }, function (res, err, msg, data) {
+        if (err !== 0) {
+            rErr("Relay fail-safe timer is not configured: " + msg + ". Existing schedule was left unchanged.");
+            return;
+        }
+        fdSc(data);
+    }, eler);
 }
 // Delete the existing schedule if it exists
 function fdSc(eler) {
-    cntr = 1;
-    Shelly.call("Schedule.Delete", { id: s.exSc }, function () {
-        cntr--;
-    });
-    wait([fScd, eler]);
+    if (!(s.exSc > 0)) {
+        fScd(eler);
+        return;
+    }
+    Shelly.call("Schedule.Delete", { id: s.exSc }, function (res, err, msg, data) {
+        if (err !== 0) {
+            // A stale KVS ID is safe to replace only after confirming that no such schedule exists.
+            Shelly.call("Schedule.List", null, function (list, listErr, listMsg, old) {
+                let found = false;
+                if (listErr === 0 && list && list.jobs) {
+                    for (let i = 0; i < list.jobs.length; i++) {
+                        if (list.jobs[i].id === old.id) {
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (!found) {
+                        s.exSc = 0;
+                        fScd(old.eler);
+                        return;
+                    }
+                }
+                rErr("Schedule " + old.id + " was not deleted: " + msg + ". Existing schedule was left unchanged. " + listMsg);
+            }, data);
+            return;
+        }
+        s.exSc = 0;
+        fScd(data.eler);
+    }, { id: s.exSc, eler: eler });
 }
 
 // Create a new schedule with the advanced timespec to cover all the hours within the same schedule item
 function fScd(eler) {
     cntr = 1;
+    _.scId = 0;
     if (eler === undefined || eler.length == 0) {
         print(_.pId, "No heating calculated for any hours with the current configuration.")
         fKvs();
@@ -754,7 +821,6 @@ function fScd(eler) {
     // Sort the heating by hour
     let sArr = srAr(eler, 0);
     eler = [];
-    _.scId = 0;
     let hArr = [];
     let pArr = [];
     for (let i = 0; i < sArr.length; i++) {
@@ -778,6 +844,9 @@ function fScd(eler) {
     }, function (res, err, msg) {
         if (err !== 0) {
             print(_.pId, "Scheduler not created:", err, msg);
+            _.tsPr = 0;
+            if (c.isFc) { _.tsFc = 0; }
+            _.manu = false;
         } else {
             _.scId = res.id; //last scheduleID to store in KVS
         }
@@ -811,16 +880,16 @@ function fMan() {
 
     let chpH = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 21, 22, 23, 18, 19, 20];
     let eler = [];
+    const fbTim = c.hTim > c.tPer ? c.tPer : c.hTim;
     for (let i = 0; i < _.cPer; i++) {                  //create schedule for each period
-        let hT = (i * c.tPer) + _.hTim;                 //find the end of the period
+        let hT = (i * c.tPer) + fbTim;                  //use configured fallback time
         hT = hT > 24 ? 24 : hT;                         //if the end of the period is more than 24, set it to 24
         for (let j = i * c.tPer; j < hT; j++) {         //find the prices in each period
             eler.push([chpH[j], "-"]);                  //copy the price to the new array
         }
     }
     chpH = null;
-    fTmr();     //set default timer
-    fdSc(eler); //delete existing schedule and pass schedule data to create schedule
+    fTmr(eler); //set the fail-safe timer before replacing the existing schedule
 }
 
 // Shelly doesnt support Javascript sort function so this basic math algorithm will do the sorting job
@@ -861,6 +930,14 @@ function srAr(arr, sort) {
 function hErr(msg) {
     print(_.pId, "# Internet error, using historical cheap hours because ", msg);
     fMan();     //set schedule manually
+    _.isLp = false;
+}
+// Handle local RPC failures without replacing the last known working schedule.
+function rErr(msg) {
+    print(_.pId, msg);
+    _.tsPr = 0;
+    if (c.isFc) { _.tsFc = 0; }
+    _.manu = false;
     _.isLp = false;
 }
 // Wait for the RPC calls to be completed before starting next function.
@@ -941,23 +1018,26 @@ function fcTm() {
 /*  ---------  WATCHDOG START  ---------   */
 /** find watchdog script ID */
 function f_Wd() {
-    Shelly.call('Script.List', null, function (res) {
-        if (res) {
-            let id = 0;
-            const scr = res.scripts;
-            res = null;
-            for (let i = 0; i < scr.length; i++) {
-                if (scr[i].name === "watchdog") {
-                    id = scr[i].id;
-                    break;
-                }
+    Shelly.call('Script.List', null, function (res, err, msg) {
+        if (err !== 0 || !res || !res.scripts) {
+            print(_.pId, "Watchdog script list failed:", msg);
+            _.isLp = false;
+            return;
+        }
+        let id = 0;
+        const scr = res.scripts;
+        res = null;
+        for (let i = 0; i < scr.length; i++) {
+            if (scr[i].name === "watchdog") {
+                id = scr[i].id;
+                break;
             }
-            /** Create a new script (id==0) or stop the existing script (id<>0) if watchdog found. */
-            if (id === 0) {
-                Shelly.call('Script.Create', { name: "watchdog" }, putC, { id: id });   //create a new watchdog 
-            } else {
-                Shelly.call('Script.Stop', { id: id }, putC, { id: id });               //stop the existing watchdog 
-            }
+        }
+        /** Create a new script (id==0) or stop the existing script (id<>0) if watchdog found. */
+        if (id === 0) {
+            Shelly.call('Script.Create', { name: "watchdog" }, putC, { id: id });   //create a new watchdog
+        } else {
+            Shelly.call('Script.Stop', { id: id }, putC, { id: id });               //stop the existing watchdog
         }
     });
 }
@@ -966,14 +1046,16 @@ function f_Wd() {
 function putC(res, err, msg, data) {
     if (err !== 0) {
         print(_.pId, "Watchdog script not created:", msg, ". Schedule will not be deleted if heating script is stopped or deleted.");
+        _.isLp = false;
     } else {
-        let code = 'let scId=0;function strt(){Shelly.call("KVS.Get",{key:"SmartHeatingSys"+scId},(function(e){e&&delS(JSON.parse(e.value))}))}function delS(e){Shelly.call("Schedule.Delete",{id:e.ExistingSchedule},(function(e,t,d,l){0!==t?print("Script #"+scId,"schedule ",l.id," deletion by watchdog failed."):print("Script #"+scId,"schedule ",l.id," deleted by watchdog.")}),{id:e.ExistingSchedule}),updK(e)}function updK(e){e.ExistingSchedule=0,Shelly.call("KVS.set",{key:"SmartHeatingSys"+scId,value:JSON.stringify(e)})}Shelly.addStatusHandler((function(e){"script"!==e.name||e.delta.running||(scId=e.id,strt())}));'
+        let code = 'function strt(e){Shelly.call("KVS.Get",{key:"SmartHeatingSys"+e},(function(t,l,n,i){0===l&&t&&delS(JSON.parse(t.value),i.id)}),{id:e})}function delS(e,t){let l=e.ExistingSchedule;l>0&&Shelly.call("Schedule.Delete",{id:l},(function(e,t,l,n){if(0!==t){print("Script #"+n.scId,"schedule ",n.id," deletion by watchdog failed.");return}print("Script #"+n.scId,"schedule ",n.id," deleted by watchdog."),updK(n.sDat,n.scId)}),{id:l,scId:t,sDat:e})}function updK(e,t){e.ExistingSchedule=0,Shelly.call("KVS.set",{key:"SmartHeatingSys"+t,value:JSON.stringify(e)})}Shelly.addStatusHandler((function(e){"script"===e.name&&!e.delta.running&&strt(e.id)}));'
         const id = res.id > 0 ? res.id : data.id;   //get the script ID
         Shelly.call('Script.PutCode', { id: id, code: code }, function (res, err, msg, data) {
             if (err === 0) {
                 a_St(data.id);
             } else {
-                print(_.pId, "Code is not added to the script:", msg, ". Schedule will notbe deleted if heating script is stopped or deleted.")
+                print(_.pId, "Code is not added to the script:", msg, ". Schedule will not be deleted if heating script is stopped or deleted.")
+                _.isLp = false;
             }
         }, { id: id });
     }
@@ -998,8 +1080,8 @@ function a_St(sId) {
         } else {
             print(_.pId, "Watchdog script is not started.", msg, ". Schedule will not be deleted if heating script is stopped or deleted.");
         }
+        _.isLp = false;
     });
-    _.isLp = false;
 }
 /*  ---------  WATCHDOG END  ---------   */
 

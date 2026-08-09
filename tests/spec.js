@@ -2,6 +2,7 @@
 // Asserts WHAT the script must do, never HOW. Safe for TDD and merge gating.
 // Run: TZ=Europe/Tallinn node tests/spec.js <path-to-script>
 const fs = require("fs");
+const vm = require("vm");
 const SRC = fs.readFileSync(process.argv[2], "utf8");
 
 const RealDate = global.Date;
@@ -92,10 +93,24 @@ const Shelly = {
         }
     },
 };
-let __t;
+// Each candidate runs in its own VM context. A hung parser or loop becomes a
+// scenario failure instead of stopping the rest of the suite.
 function boot() {
-    eval(SRC + "\n;__t = { fcTm: fcTm, loop: loop, verC: verC, _: _ };");
-    return __t;
+    const ctx = vm.createContext({ Shelly, Timer, print, atob, Date, console: { log: print } });
+    const t = {
+        err: null,
+        drive: (code) => {
+            t.err = null;
+            try { return vm.runInContext(code, ctx, { timeout: 3000 }); }
+            catch (e) { t.err = e; return undefined; }
+        },
+    };
+    t.drive(SRC);
+    t.fcTm = () => t.drive("fcTm()");
+    t.loop = () => t.drive("loop()");
+    t.stale = () => t.drive("_.tsPr = 0");
+    t.verC = (oldV, newV) => t.drive("verC(" + JSON.stringify(oldV) + "," + JSON.stringify(newV) + ")");
+    return t;
 }
 
 // ---- request-adaptive price server: honors whatever window the script asks for ----
@@ -243,27 +258,34 @@ W.sysConfig = { location: null };
 W.kvs["SmartHeatingConf1"] = conf({ IsForecastUsed: true });
 W.http = priceServer(PRICE);
 t = boot();
-let threw = false;
-try { t.fcTm(); } catch (e) { threw = true; }
-check("S6b no crash without location, fallback schedule exists", !threw && specHours(W.schedules[0] && W.schedules[0].timespec) === FALLBACK, [threw, W.schedules[0]]);
+t.fcTm();
+check("S6b no crash without location, fallback schedule exists", !t.err && specHours(W.schedules[0] && W.schedules[0].timespec) === FALLBACK,
+    [String(t.err || ""), W.schedules[0]]);
 
 // S7. Liveness: after one failed cycle, the next healthy cycle must schedule correctly.
-function recovers(name, breakFn, healFn) {
+const PRICE2 = h => (h * 5) % 24 + 10; //different ordering exposes a stuck first-cycle schedule
+function recovers(name, breakFn, healFn, stale) {
     W = freshWorld();
     W.kvs["SmartHeatingConf1"] = conf();
     W.http = priceServer(PRICE);
     breakFn();
     t = boot();
-    threw = false;
-    try { t.fcTm(); } catch (e) { threw = true; }
+    t.fcTm();
+    const crashed = !!t.err;
     healFn();
-    if (!threw) t.loop(); // the regular 5-minute tick
+    let exp = cheapest(EVE.normal, 24, 10, PRICE);
+    if (stale) {
+        W.http = priceServer(PRICE2);
+        exp = cheapest(EVE.normal, 24, 10, PRICE2);
+        t.stale();
+    }
+    if (!crashed) t.loop(); // the regular 5-minute tick
     const got = W.schedules.length ? specHours(W.schedules[W.schedules.length - 1].timespec) : null;
-    check("S7 " + name, !threw && got === cheapest(EVE.normal, 24, 10, PRICE), [threw, got]);
+    check("S7 " + name, !crashed && !t.err && got === exp, [String(t.err || ""), got]);
 }
-recovers("recovers after Elering outage", () => { W.http = () => [null, -114]; }, () => { W.http = priceServer(PRICE); });
-recovers("recovers after Schedule.Create failure", () => { W.fail["Schedule.Create"] = true; }, () => { delete W.fail["Schedule.Create"]; });
-recovers("recovers after watchdog list failure", () => { W.fail["Script.List"] = true; }, () => { delete W.fail["Script.List"]; });
+recovers("recovers after Elering outage", () => { W.http = () => [null, -114]; }, () => { W.http = priceServer(PRICE); }, false);
+recovers("recovers after Schedule.Create failure", () => { W.fail["Schedule.Create"] = true; }, () => { delete W.fail["Schedule.Create"]; }, false);
+recovers("recovers after watchdog list failure", () => { W.fail["Script.List"] = true; }, () => { delete W.fail["Script.List"]; }, true);
 
 // S7b. A transient component read must never replace user settings with defaults.
 const VC_SET = [
@@ -300,7 +322,7 @@ function preservesSchedule(name, method) {
     t.fcTm();
     const oldId = W.schedules[0].id;
     W.fail[method] = true;
-    t._.tsPr = 0;
+    t.stale();
     t.loop();
     const preserved = W.schedules.length === 1 && W.schedules[0].id === oldId && W.deleted.indexOf(oldId) === -1;
     delete W.fail[method];
@@ -342,12 +364,14 @@ W = freshWorld();
 W.kvs["SmartHeatingConf1"] = conf({ EnergyProvider: { dRt: 60.7 } });
 W.http = priceServer(PRICE);
 t = boot();
-threw = false;
-try { t.fcTm(); } catch (e) { threw = true; }
-if (!threw) t.loop();
+t.fcTm();
+const s9c1 = t.err;
+if (!s9c1) t.loop();
 {
+    const crashed = !!(s9c1 || t.err);
     const stored = W.kvs["SmartHeatingConf1"] ? JSON.parse(W.kvs["SmartHeatingConf1"]).EnergyProvider : null;
-    check("S9 corrupted package: no crash, string persisted back", !threw && typeof stored === "string", [threw, stored]);
+    check("S9 corrupted package: no crash, string persisted back", !crashed && typeof stored === "string",
+        [String(s9c1 || t.err || ""), stored]);
     check("S9 corrupted package: heating still scheduled", W.schedules.length > 0, W.schedules.length);
 }
 
@@ -491,11 +515,11 @@ W.kvs["SmartHeatingConf1"] = conf();
 W.http = priceServer(PRICE);
 t = boot();
 t.fcTm();
-t._.tsPr = 0;
+t.stale();
 t.loop();
 const noRewriteWhileRunning = W.putCode === 1;
 W.running[3] = false;
-t._.tsPr = 0;
+t.stale();
 t.loop();
 check("S13 watchdog is written once and restarted without a rewrite", noRewriteWhileRunning && W.putCode === 1 && W.running[3] === true,
     [W.putCode, W.running]);

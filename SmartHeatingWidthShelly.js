@@ -17,20 +17,25 @@ Elektrilevi https://elektrilevi.ee/en/vorguleping/vorgupaketid/eramu
 Imatra https://imatraelekter.ee/vorguteenus/vorguteenuse-hinnakirjad/
 Latvia https://sadalestikls.lv/en/tarifi
 */
-function pack() {
-    return {
-        VORK1: { dRt: 77.2, nRt: 77.2, dMRt: 77.2, hMRt: 77.2 },
-        VORK2: { dRt: 60.7, nRt: 35.1, dMRt: 60.7, hMRt: 35.1 },
-        VORK4: { dRt: 36.9, nRt: 21, dMRt: 36.9, hMRt: 21 },
-        VORK5: { dRt: 52.9, nRt: 30.3, dMRt: 81.8, hMRt: 47.4 },
-        PARTN24: { dRt: 60.7, nRt: 60.7, dMRt: 60.7, hMRt: 60.7 },
-        PARTN24PL: { dRt: 38.6, nRt: 38.6, dMRt: 38.6, hMRt: 38.6 },
-        PARTN12: { dRt: 72.4, nRt: 42, dMRt: 72.4, hMRt: 42 },
-        PARTN12PL: { dRt: 46.4, nRt: 27.1, dMRt: 46.4, hMRt: 27.1 },
-        PAMATA1: { dRt: 39.62, nRt: 39.62, dMRt: 39.62, hMRt: 39.62 },
-        SPECIAL1: { dRt: 158.48, nRt: 158.48, dMRt: 158.48, hMRt: 158.48 },
-        NONE: { dRt: 0, nRt: 0, dMRt: 0, hMRt: 0 },
+function pack(key, checkOnly) {
+    if (checkOnly) {
+        return key === "VORK1" || key === "VORK2" || key === "VORK4" || key === "VORK5" ||
+            key === "PARTN24" || key === "PARTN24PL" || key === "PARTN12" || key === "PARTN12PL" ||
+            key === "PAMATA1" || key === "SPECIAL1" || key === "NONE";
     }
+    let rate = null;
+    if (key === "VORK1") { rate = { dRt: 77.2, nRt: 77.2, dMRt: 77.2, hMRt: 77.2 }; }
+    else if (key === "VORK2") { rate = { dRt: 60.7, nRt: 35.1, dMRt: 60.7, hMRt: 35.1 }; }
+    else if (key === "VORK4") { rate = { dRt: 36.9, nRt: 21, dMRt: 36.9, hMRt: 21 }; }
+    else if (key === "VORK5") { rate = { dRt: 52.9, nRt: 30.3, dMRt: 81.8, hMRt: 47.4 }; }
+    else if (key === "PARTN24") { rate = { dRt: 60.7, nRt: 60.7, dMRt: 60.7, hMRt: 60.7 }; }
+    else if (key === "PARTN24PL") { rate = { dRt: 38.6, nRt: 38.6, dMRt: 38.6, hMRt: 38.6 }; }
+    else if (key === "PARTN12") { rate = { dRt: 72.4, nRt: 42, dMRt: 72.4, hMRt: 42 }; }
+    else if (key === "PARTN12PL") { rate = { dRt: 46.4, nRt: 27.1, dMRt: 46.4, hMRt: 27.1 }; }
+    else if (key === "PAMATA1") { rate = { dRt: 39.62, nRt: 39.62, dMRt: 39.62, hMRt: 39.62 }; }
+    else if (key === "SPECIAL1") { rate = { dRt: 158.48, nRt: 158.48, dMRt: 158.48, hMRt: 158.48 }; }
+    else if (key === "NONE") { rate = { dRt: 0, nRt: 0, dMRt: 0, hMRt: 0 }; }
+    return rate;
 }
 /****** INITIAL SETTINGS ******/
 /* 
@@ -115,6 +120,8 @@ let _ = {
     newV: 5.0,      //new script version
     sdOk: false,    //system data OK
     cdOk: false,    //configuration data OK
+    wdOk: false,    //watchdog code verified since boot
+    wdId: 0,        //watchdog script ID
 };
 let cntr = 0;    //counter for async functions
 
@@ -250,7 +257,15 @@ function verC(old, newV) {
         if (a > b) return true;
         if (a < b) return false;
     }
-    return false;
+    return true; //equal versions meet the minimum requirement
+}
+// Normalize persisted and Virtual Component values before using or storing them.
+function normC() {
+    const period = Number(c.tPer);
+    const heat = Number(c.hTim);
+    c.tPer = period === 0 || period === 6 || period === 12 || period === 24 ? period : 24;
+    c.hTim = heat === heat && heat >= 0 ? heat : 10;
+    if (!pack(c.pack, true)) { c.pack = "NONE"; }
 }
 // Get KVS ConfigurationData into memory
 function memC(dt) {
@@ -265,6 +280,7 @@ function memC(dt) {
     c.cnty = dt.Country;
     c.hCur = dt.HeatingCurve;
     c.mnKv = typeof dt.ManualKVS === "boolean" ? dt.ManualKVS : c.mnKv;
+    normC();
     return c;
 }
 // ConfigurationData data to KVS store
@@ -344,37 +360,56 @@ function tKvs() {
     Shelly.call("KVS.set", { key: "SmartHeatingConf" + _.sId, value: JSON.stringify(kvsC()) },
         function (res, err, msg) {
             if (err !== 0) {
-                console.log(_.pId, "Configuration not stored in KVS:", err, msg);
+                print(_.pId, "Configuration not stored in KVS:", err, msg);
             } else {
-                console.log(_.pId, "Configuration settings stored in KVS");
+                print(_.pId, "Configuration settings stored in KVS");
             }
         }
     );
     main();
 }
 
-// Install Virtual Components only when this script's reserved component keys are free.
-function gVc() {
+// Install Virtual Components only after every response page confirms that the reserved keys are free.
+function gVc(state) {
+    if (!state || typeof state !== "object" || state.offset === undefined) {
+        state = {
+            offset: 0,
+            keys: ["group:200", "enum:200", "number:200", "enum:201", "number:201", "number:202", "boolean:201", "enum:202", "boolean:200", "number:203"]
+        };
+    }
     Shelly.call("Shelly.GetComponents", {
         dynamic_only: true,
-        keys: ["group:200", "enum:200", "number:200", "enum:201", "number:201", "number:202", "boolean:201", "enum:202", "boolean:200", "number:203"]
-    }, function (res, err, msg) {
-        if (err !== 0 || !res) {
+        keys: state.keys,
+        offset: state.offset
+    }, function (res, err, msg, data) {
+        if (err !== 0 || !res || !res.components) {
             print(_.pId, "Failed to get virtual components: " + msg);
             print(_.pId, "Using KVS mode for this run.");
             tKvs();
             return;
         }
-
-        // Treat an incomplete response conservatively: never overwrite or delete existing components.
-        if (res.total !== 0) {
-            print(_.pId, "Reserved virtual component slots are already in use or could not be counted. Existing components were left unchanged.");
+        const comp = res.components;
+        for (let i = 0; i < comp.length; i++) {
+            if (data.keys.indexOf(comp[i].key) !== -1) {
+                print(_.pId, "Reserved virtual component slots are already in use. Existing components were left unchanged.");
+                print(_.pId, "Using KVS mode for this run.");
+                tKvs();
+                return;
+            }
+        }
+        const next = (typeof res.offset === "number" ? res.offset : data.offset) + comp.length;
+        if (typeof res.total === "number" && next < res.total && comp.length > 0) {
+            data.offset = next;
+            gVc(data);
+        } else if (typeof res.total !== "number" && comp.length > 0) {
+            // Without a count we cannot prove that a later page does not contain a collision.
+            print(_.pId, "Virtual component response could not be counted. Existing components were left unchanged.");
             print(_.pId, "Using KVS mode for this run.");
             tKvs();
         } else {
             aVc(dtVc());
         }
-    });
+    }, state);
 }
 
 // Add all new virtual components
@@ -426,67 +461,77 @@ function sGrp() {
     rVc();
 }
 
-// Read all virtual components and store the values to memory
-function rVc() {
-    cntr++;
-    let mpVC = [
-        ["tPer", "enum:200"],
-        ["hTim", "number:200"],
-        ["isFc", "boolean:200"],
-        ["pack", "enum:201"],
-        ["lowR", "number:201"],
-        ["higR", "number:202"],
-        ["Inv", "boolean:201"],
-        ["cnty", "enum:202"],
-        ["hCur", "number:203"],
-    ];
-    let vKey = [];
-    for (let i = 0; i < mpVC.length; i++) { vKey.push(mpVC[i][1]); }
-    Shelly.call("Shelly.GetComponents", { dynamic_only: true, keys: vKey, include: ["status"] },
-        function (res, err, msg) {
-            let comp = err === 0 && res ? res.components : null;
-            let isOk = !!(err === 0 && res && comp);
-            if (isOk) {
-                for (let i = 0; i < mpVC.length; i++) {
-                    let found = false;
-                    for (let j = 0; j < comp.length; j++) {
-                        if (mpVC[i][1] === comp[j].key && comp[j].status && comp[j].status.value !== undefined) {
-                            mpVC[i][2] = comp[j].status.value;
-                            found = true;
-                            break;
-                        }
-                    }
-                    if (!found) {
-                        isOk = false;
-                        break;
-                    }
+// Read every page of this script's Virtual Components and commit only a complete value set.
+function rVc(state) {
+    if (!state || typeof state !== "object" || !state.map) {
+        cntr++;
+        state = {
+            offset: 0,
+            map: [
+                ["tPer", "enum:200", null, false],
+                ["hTim", "number:200", null, false],
+                ["isFc", "boolean:200", null, false],
+                ["pack", "enum:201", null, false],
+                ["lowR", "number:201", null, false],
+                ["higR", "number:202", null, false],
+                ["Inv", "boolean:201", null, false],
+                ["cnty", "enum:202", null, false],
+                ["hCur", "number:203", null, false]
+            ],
+            keys: []
+        };
+        for (let i = 0; i < state.map.length; i++) { state.keys.push(state.map[i][1]); }
+    }
+    Shelly.call("Shelly.GetComponents", {
+        dynamic_only: true,
+        keys: state.keys,
+        include: ["status"],
+        offset: state.offset
+    }, function (res, err, msg, data) {
+        if (err !== 0 || !res || !res.components) {
+            cntr--;
+            rErr("Virtual Component read failed" + (msg ? ": " + msg : "") + ". Existing schedule was left unchanged.");
+            return;
+        }
+        const comp = res.components;
+        for (let i = 0; i < data.map.length; i++) {
+            if (data.map[i][3]) { continue; }
+            for (let j = 0; j < comp.length; j++) {
+                if (data.map[i][1] === comp[j].key && comp[j].status && comp[j].status.value !== undefined) {
+                    data.map[i][2] = comp[j].status.value;
+                    data.map[i][3] = true;
+                    break;
                 }
             }
-            if (isOk) {
-                for (let i = 0; i < mpVC.length; i++) { c[mpVC[i][0]] = mpVC[i][2]; }
-            }
-            res = null;
-            comp = null;
-            mpVC = null;
-            vKey = null;
-            cntr--;
-            if (isOk) {
-                print(_.pId, "Virtual Component mode active");
-                main();
-            } else {
-                print(_.pId, "Virtual Component controls are unavailable or incomplete" + (msg ? ": " + msg : "") + ".");
-                print(_.pId, "Using KVS mode for this run.");
-                tKvs();
-            }
-        });
+        }
+        const next = (typeof res.offset === "number" ? res.offset : data.offset) + comp.length;
+        if (typeof res.total === "number" && next < res.total && comp.length > 0) {
+            data.offset = next;
+            rVc(data);
+            return;
+        }
+        let isOk = true;
+        for (let i = 0; i < data.map.length; i++) {
+            if (!data.map[i][3]) { isOk = false; break; }
+        }
+        if (isOk) {
+            for (let i = 0; i < data.map.length; i++) { c[data.map[i][0]] = data.map[i][2]; }
+        }
+        cntr--;
+        if (isOk) {
+            print(_.pId, "Virtual Component mode active");
+            main();
+        } else {
+            print(_.pId, "Virtual Component controls are unavailable or incomplete.");
+            print(_.pId, "Using KVS mode for this run.");
+            tKvs();
+        }
+    }, state);
 }
 
 // Main script where all the logic starts.
 function main() {
-    if (typeof c.pack !== "string") {
-        rErr("Configuration data unavailable; retrying.");
-        return;
-    }
+    normC();
     _.cPer = c.tPer <= 0 ? 0 : Math.ceil((24 * 100) / (c.tPer * 100));  //number of periods in a day
     _.hTim = c.hTim > c.tPer ? c.tPer : c.hTim;                         //heating time can't be more than the period
     //check if Shelly has time
@@ -515,26 +560,45 @@ function main() {
 
 // Get Open-Meteo min and max "feels like" temperatures
 function gFcs() {
-    const lat = JSON.stringify(Shelly.getComponentConfig("sys").location.lat);
-    const lon = JSON.stringify(Shelly.getComponentConfig("sys").location.lon);
+    const loc = Shelly.getComponentConfig("sys").location;
+    if (!loc || loc.lat === null || loc.lat === undefined || loc.lon === null || loc.lon === undefined) {
+        hErr("Shelly has no location for the forecast; set the device location.");
+        return;
+    }
     let url = "https://api.open-meteo.com/v1/forecast?hourly=apparent_temperature&timezone=auto&forecast_days=1&forecast_hours=";
-    url = url + c.tPer + "&latitude=" + lat + "&longitude=" + lon;
+    url = url + c.tPer + "&latitude=" + loc.lat + "&longitude=" + loc.lon;
     print(_.pId, "Forecast query: ", url)
     Shelly.call("HTTP.GET", { url: url, timeout: 5, ssl_ca: "*" }, function (res, err) {
         url = null;
-        if (err != 0 || res === null || res.code != 200) {
+        if (err != 0 || res === null || res.code != 200 || !res.body) {
             hErr("Get forecast HTTP.GET error, check again in " + _.freq / 60 + " min.");
             return;
         }
-        //open-meteo json response to get 6h, 12h or 24h temperatures
-        const temp = JSON.parse(res.body)["hourly"]["apparent_temperature"];
-        res = null;
+        // Scan only the needed array instead of materializing the full JSON response.
         let sumT = 0;
-        for (let i = 0; i < temp.length; i++) {
-            sumT += temp[i];
+        let nTmp = 0;
+        let pos = res.body.indexOf("\"apparent_temperature\":[");
+        if (pos >= 0) {
+            pos += 24;
+            const end = res.body.indexOf("]", pos);
+            while (pos > 0 && pos < end) {
+                let next = res.body.indexOf(",", pos);
+                if (next < 0 || next > end) { next = end; }
+                const temp = Number(res.body.substring(pos, next));
+                if (temp === temp) {
+                    sumT += temp;
+                    nTmp++;
+                }
+                pos = next + 1;
+            }
+        }
+        res = null;
+        if (nTmp === 0) {
+            hErr("Forecast response has no temperatures, check again in " + _.freq / 60 + " min.");
+            return;
         }
 
-        const tFcs = Math.ceil(sumT / c.tPer);      //AVG and round temperature up
+        const tFcs = Math.ceil(sumT / nTmp);        //AVG and round temperature up
         _.tsFc = Math.floor(Date.now() / 1000.0);   //store the timestamp into memory
         print(_.pId, "We got weather forecast from Open Meteo at ", new Date().toString());
 
@@ -583,9 +647,10 @@ function gEle() {
             hErr("Elering HTTP.GET error, check again in " + _.freq / 60 + " min.");
             return;
         }
-        let p = pack()[c.pack]; //load the selected transfer fee without replacing the configuration value
+        let p = pack(c.pack, false); //allocate only the selected transfer fee package
         if (!p) {
-            rErr("Unknown network package: " + c.pack + ".");
+            c.pack = "NONE";
+            rErr("Unknown network package; reset to NONE and retrying.");
             return;
         }
 
@@ -715,9 +780,10 @@ function gTz(epoch) {
 
 // Calculate transfer fee based on the timestamp.
 function fFee(epoch, p) {
-    const hour = new Date(epoch * 1000).getHours();
-    const day = new Date(epoch * 1000).getDay();
-    const mnth = new Date(epoch * 1000).getMonth();
+    const dt = new Date(epoch * 1000);
+    const hour = dt.getHours();
+    const day = dt.getDay();
+    const mnth = dt.getMonth();
     if (_.prov === "Elektlevi") {
         if ((mnth >= 10 || mnth <= 2) && (day === 0 || day === 6) && hour >= 16 && hour < 20) {
             // peak holiday: Nov-Mar, SA-SU at 16:00–20:00
@@ -909,17 +975,17 @@ function srAr(arr, sort) {
             }
         }
         tmp = arr[i];
-        arr.splice(i, 1, arr[minX]);
-        arr.splice(minX, 1, tmp);
+        arr[i] = arr[minX];
+        arr[minX] = tmp;
 
         if (arr[minX][sort] === max) {
             tmp = arr[j];
-            arr.splice(j, 1, arr[minX]);
-            arr.splice(minX, 1, tmp);
+            arr[j] = arr[minX];
+            arr[minX] = tmp;
         } else {
             tmp = arr[j];
-            arr.splice(j, 1, arr[maxX]);
-            arr.splice(maxX, 1, tmp);
+            arr[j] = arr[maxX];
+            arr[maxX] = tmp;
         }
         j--;
     }
@@ -1018,6 +1084,27 @@ function fcTm() {
 /*  ---------  WATCHDOG START  ---------   */
 /** find watchdog script ID */
 function f_Wd() {
+    if (_.wdOk) {
+        const status = Shelly.getComponentStatus("script", _.wdId);
+        if (status && status.running) {
+            _.isLp = false;
+            return;
+        }
+        _.wdOk = false;
+        if (status) {
+            // Restart stopped code without another flash write.
+            Shelly.call('Script.Start', { id: _.wdId }, function (res, err) {
+                if (err === 0) {
+                    _.wdOk = true;
+                    print(_.pId, "Watchdog script started again.");
+                    _.isLp = false;
+                } else {
+                    f_Wd(); //fall back to reinstalling the watchdog
+                }
+            });
+            return;
+        }
+    }
     Shelly.call('Script.List', null, function (res, err, msg) {
         if (err !== 0 || !res || !res.scripts) {
             print(_.pId, "Watchdog script list failed:", msg);
@@ -1073,11 +1160,14 @@ function a_St(sId) {
     // Start the watchdog
     Shelly.call('Script.Start', { id: sId }, function (res, err, msg) {
         if (err === 0) {
+            _.wdOk = true;
+            _.wdId = sId;
             print(_.pId, "Watchdog script created and started successfully.");
             print("// Memory Used:", Shelly.getComponentStatus("script", Shelly.getCurrentScriptId()).mem_used,
                 "Peak:", Shelly.getComponentStatus("script", Shelly.getCurrentScriptId()).mem_peak);
 
         } else {
+            _.wdOk = false;
             print(_.pId, "Watchdog script is not started.", msg, ". Schedule will not be deleted if heating script is stopped or deleted.");
         }
         _.isLp = false;

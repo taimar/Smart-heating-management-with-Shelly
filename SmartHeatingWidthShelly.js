@@ -414,21 +414,19 @@ function gVc(state) {
 
 // Add all new virtual components
 function aVc(vCom) {
-    if (cntr < 6 - 1) {
-        for (let i = 0; i < 1 && i < vCom.length; i++) {
-            let comp = vCom.splice(0, 1)[0];
-            cntr++;
-            Shelly.call("Virtual.Add", { type: comp.type, id: comp.id, config: comp.config },
-                function (res, err, msg) {
-                    if (err === 0) {
-                        print(_.pId, "Added new virtual component: " + res.id);
-                    } else {
-                        print(_.pId, "Virtual component is not added: " + msg);
-                    }
-                    cntr--;
+    if (cntr < 5 && vCom.length > 0) {
+        let comp = vCom.splice(0, 1)[0];
+        cntr++;
+        Shelly.call("Virtual.Add", { type: comp.type, id: comp.id, config: comp.config },
+            function (res, err, msg) {
+                if (err === 0) {
+                    print(_.pId, "Added new virtual component: " + res.id);
+                } else {
+                    print(_.pId, "Virtual component is not added: " + msg);
                 }
-            );
-        }
+                cntr--;
+            }
+        );
     }
     if (vCom.length > 0) {
         Timer.set(1000, false, aVc, vCom);
@@ -770,8 +768,7 @@ function gEle() {
 
 // Get Shelly timezone offset in seconds 
 function gTz(epoch) {
-    const ts = epoch === undefined ? Shelly.getComponentStatus("sys").unixtime : epoch;
-    const shDt = new Date(ts * 1000);
+    const shDt = new Date(epoch * 1000);
     const shHr = shDt.getHours();
     const utcH = Number(shDt.toISOString().slice(11, 13));
     let tz = shHr - utcH;
@@ -783,9 +780,7 @@ function gTz(epoch) {
 // UTC epoch of local midnight, addD local days from the supplied epoch.
 function lMid(epoch, addD) {
     const day = Math.floor((epoch + gTz(epoch)) / (24 * 60 * 60)) + addD;
-    let mid = day * 24 * 60 * 60 - gTz(day * 24 * 60 * 60);
-    mid = day * 24 * 60 * 60 - gTz(mid);
-    return mid;
+    return day * 24 * 60 * 60 - gTz(day * 24 * 60 * 60);
 }
 
 // Calculate transfer fee based on the timestamp.

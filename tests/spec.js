@@ -32,7 +32,7 @@ function freshWorld() {
         kvs: {}, schedules: [], deleted: [], nextId: 5,
         scripts: [{ id: 3, name: "watchdog" }], running: { 3: true },
         vcs: [], vDeleted: [], http: null, fail: {}, lastUrl: null,
-        putCode: 0, ignoreKeys: false,
+        putCode: 0, ignoreKeys: false, relayConfigs: [],
         device: { gen: 2, app: "Plus1PM", ver: "1.4.4" },
         sysConfig: { location: { lat: 59.44, lon: 24.75 } },
         unixtime: FIXED_MS / 1000,
@@ -61,7 +61,7 @@ const Shelly = {
             case "KVS.Get": return W.kvs[p.key] !== undefined ? done({ value: W.kvs[p.key] }, 0) : done(null, -105, "not found");
             case "KVS.set": case "KVS.Set": W.kvs[p.key] = p.value; return done({}, 0);
             case "HTTP.GET": { W.lastUrl = p.url; const r = W.http(p); return done(r[0], r[1], ""); }
-            case "Switch.SetConfig": return done({}, 0);
+            case "Switch.SetConfig": W.relayConfigs.push(p.config); return done({}, 0);
             case "Schedule.Delete": {
                 const i = W.schedules.findIndex(s => s.id === p.id);
                 if (i === -1) return done(null, -103, "no such schedule");
@@ -369,11 +369,60 @@ const partialLogStart = prints.length;
 t = boot();
 t.fcTm();
 check("S7c missing SystemData: partial controls are left untouched",
-    W.vcs.length === 1 && W.vDeleted.length === 0 && W.schedules.length === 1,
+    W.vcs.length === 1 && W.vDeleted.length === 0 && W.schedules.length === 0 &&
+    W.relayConfigs.length === 0 && Object.keys(W.kvs).length === 0,
     [W.vcs.length, W.vDeleted, W.schedules.length]);
 check("S7c missing SystemData: ambiguous recovery is explained",
     prints.slice(partialLogStart).some(line => /incomplete|partial|ambiguous/i.test(line)),
     prints.slice(partialLogStart));
+
+// A missing optional control must not replace an installed inverted-relay
+// configuration with defaults or stale KVS settings, even across retries.
+for (const savedConfig of [undefined, conf({ ManualKVS: false })]) {
+    W = freshWorld();
+    W.device = { gen: 3, app: "Mini1G3", ver: "1.4.4" };
+    if (savedConfig !== undefined) W.kvs.SmartHeatingConf1 = savedConfig;
+    W.kvs.SmartHeatingSys1 = JSON.stringify({ ExistingSchedule: 41, Version: 4.9 });
+    const controls = VC_SET.map(e => {
+        let value = e[2];
+        if (e[0] === "boolean:201") value = true; // Inverted relay
+        if (e[0] === "number:200") value = 2;     // Heating hours
+        return {
+            key: e[0], config: { name: e[1] },
+            status: { value },
+        };
+    });
+    W.vcs = controls.filter(e => e.key !== "number:203");
+    const expectedHours = cheapest(EVE.normal, 12, 2, PRICE);
+    W.schedules = [{ id: 41, timespec: "0 0 " + expectedHours + " * * *",
+        calls: [{ method: "Switch.Set", params: { id: 0, on: false } }] }];
+    W.http = priceServer(PRICE);
+    const oldSchedules = JSON.stringify(W.schedules);
+    const oldKvs = JSON.stringify(W.kvs);
+    const label = savedConfig === undefined ? "no saved config" : "stale saved config";
+    t = boot();
+    t.fcTm();
+    const bootError = t.err;
+    t.loop();
+    check("S7c missing control, " + label + ": schedule and relay preserved on retries",
+        !bootError && !t.err && JSON.stringify(W.schedules) === oldSchedules &&
+        W.deleted.length === 0 && W.relayConfigs.length === 0,
+        [String(bootError || t.err || ""), W.schedules, W.relayConfigs]);
+    check("S7c missing control, " + label + ": stored configuration preserved",
+        JSON.stringify(W.kvs) === oldKvs, W.kvs);
+    W.vcs = controls;
+    t.loop();
+    const schedule = W.schedules[0];
+    const relay = W.relayConfigs[0];
+    check("S7c restored control, " + label + ": normal retry restores user heating hours",
+        !t.err && W.schedules.length === 1 && schedule.id !== 41 &&
+        W.deleted.indexOf(41) !== -1 && specHours(schedule.timespec) === expectedHours,
+        [String(t.err || ""), W.schedules]);
+    check("S7c restored control, " + label + ": inverted relay settings restored",
+        schedule && schedule.calls[0].params.on === false &&
+        relay && relay.auto_on === true && relay.auto_off === false,
+        [schedule, relay]);
+}
 
 // S7d. Local RPC failures must leave the last working schedule intact and retry later.
 function preservesSchedule(name, method) {
@@ -416,8 +465,10 @@ for (const [name, comps] of [
     W.http = priceServer(PRICE);
     t = boot();
     t.fcTm();
-    check("S8 " + name + " is never deleted, heating still scheduled",
-        W.vDeleted.length === 0 && W.schedules.length === 1, [W.vDeleted, W.schedules.length]);
+    check("S8 " + name + " is left untouched without scheduling unverified settings",
+        W.vDeleted.length === 0 && W.vcs.length === comps.length &&
+        W.schedules.length === 0 && W.relayConfigs.length === 0 && Object.keys(W.kvs).length === 0,
+        [W.vDeleted, W.schedules.length, W.kvs]);
 }
 
 // S9. A corrupted stored package value must not crash, must not persist further,

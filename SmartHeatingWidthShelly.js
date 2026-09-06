@@ -529,8 +529,8 @@ function rVc(state) {
             print(_.pId, data.recover ?
                 "Virtual Component recovery is incomplete or ambiguous. Restore all heating controls, or remove reserved IDs and restart to reinstall. Existing components were left unchanged." :
                 "Virtual Component controls are unavailable or incomplete.");
-            print(_.pId, "Using KVS mode for this run.");
-            tKvs();
+            // KVS settings may be absent or stale; keep the active relay configuration until all controls can be read.
+            rErr("Existing schedule and relay settings were left unchanged. Retrying in " + _.freq / 60 + " min.");
         }
     }, state);
 }

@@ -17,6 +17,7 @@ The suite covers:
 - safe schedule replacement;
 - corrupted and string-valued configuration;
 - Virtual Component ownership, filtered and unfiltered pagination;
+- incomplete Virtual Component reads preserve schedules, relay settings, and KVS data, then recover on the normal retry;
 - embedded watchdog deletion, concurrency, and flash-write behavior.
 
 The price server adapts to either supported request convention: an exclusive next-midnight `end`, or an inclusive final-quarter `end`. Expected schedule hours are calculated by an independent oracle.

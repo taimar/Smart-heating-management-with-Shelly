@@ -1,4 +1,4 @@
-// Implementation-agnostic requirement suite for SmartHeatingWidthShelly.js.
+// Implementation-agnostic requirement suite for SmartHeatingWithShelly.js.
 // Asserts WHAT the script must do, never HOW. Safe for TDD and merge gating.
 // Run: TZ=Europe/Tallinn node tests/spec.js <path-to-script>
 const fs = require("fs");

@@ -1,11 +1,11 @@
-# Requirement tests for SmartHeatingWidthShelly.js
+# Requirement tests for SmartHeatingWithShelly.js
 
 `spec.js` is the merge gate for the heating script. It runs the real script in a stubbed Shelly environment and specifies externally observable requirements rather than a particular implementation. Each candidate runs in a Node VM with a three-second limit per driven call, so an infinite parser or control loop is reported without stopping the remaining scenarios.
 
 Run it from the repository root:
 
 ```bash
-TZ=Europe/Tallinn node tests/spec.js SmartHeatingWidthShelly.js
+TZ=Europe/Tallinn node tests/spec.js SmartHeatingWithShelly.js
 ```
 
 The suite covers:

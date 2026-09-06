@@ -86,7 +86,13 @@ const Shelly = {
                 if (p.keys && !W.ignoreKeys) list = list.filter(v => p.keys.indexOf(v.key) !== -1);
                 const ps = W.pageSize || 1000;
                 const off = p.offset || 0;
-                return done({ components: list.slice(off, off + ps), total: list.length, offset: off }, 0);
+                const components = list.slice(off, off + ps).map(v => {
+                    const entry = { key: v.key };
+                    if (!p.include || p.include.includes("status")) entry.status = v.status;
+                    if (!p.include || p.include.includes("config")) entry.config = v.config;
+                    return entry;
+                });
+                return done({ components, total: list.length, offset: off }, 0);
             }
             case "Virtual.Delete": {
                 W.vDeleted.push(p.key);
@@ -500,30 +506,21 @@ for (const [name, comps] of [
         [W.vDeleted, W.schedules.length, W.kvs]);
 }
 
-// S9. A corrupted stored package value must not crash, must not persist further,
-// and heating management must continue.
-W = freshWorld();
-W.kvs["SmartHeatingConf1"] = conf({ EnergyProvider: { dRt: 60.7 } });
-W.http = priceServer(PRICE);
-t = boot();
-t.fcTm();
-const s9c1 = t.err;
-if (!s9c1) t.loop();
-{
-    const crashed = !!(s9c1 || t.err);
-    const stored = W.kvs["SmartHeatingConf1"] ? JSON.parse(W.kvs["SmartHeatingConf1"]).EnergyProvider : null;
-    check("S9 corrupted package: no crash, string persisted back", !crashed && typeof stored === "string",
-        [String(s9c1 || t.err || ""), stored]);
-    check("S9 corrupted package: heating still scheduled", W.schedules.length > 0, W.schedules.length);
+// S9. Unsupported packages are reported without rewriting user settings or applying guessed settings.
+for (const badPackage of [{ dRt: 60.7 }, "REMOVED_PACKAGE"]) {
+    W = freshWorld();
+    const saved = conf({ EnergyProvider: badPackage });
+    W.kvs.SmartHeatingConf1 = saved;
+    W.http = priceServer(PRICE);
+    const start = prints.length;
+    t = boot(); t.fcTm(); t.loop();
+    check("S9 invalid package " + JSON.stringify(badPackage) + " is preserved without changing heating",
+        !t.err && W.kvs.SmartHeatingConf1 === saved && W.schedules.length === 0 && W.relayConfigs.length === 0 &&
+        prints.slice(start).some(line => line.includes("EnergyProvider")), [String(t.err || ""), W.kvs]);
+    W.kvs.SmartHeatingConf1 = conf();
+    t.loop();
+    check("S9 corrected package resumes normal scheduling", !t.err && W.schedules.length === 1 && specHours(W.schedules[0].timespec) === cheapest(EVE.normal, 24, 10, PRICE));
 }
-
-W = freshWorld();
-W.kvs["SmartHeatingConf1"] = conf({ EnergyProvider: "REMOVED_PACKAGE" });
-W.http = priceServer(PRICE);
-t = boot();
-t.fcTm();
-check("S9 unknown package name self-heals", JSON.parse(W.kvs["SmartHeatingConf1"]).EnergyProvider === "NONE" && W.schedules.length > 0,
-    W.kvs["SmartHeatingConf1"]);
 
 // S10. Virtual component enums deliver strings: schedules must stay valid.
 W = freshWorld();
@@ -856,6 +853,122 @@ check("S17 asynchronous install retry and restart repair finish within RPC/timer
     W.schedules[0].calls[0].params.on === false && W.vcs.length === 15 && W.vDeleted.length === 0 &&
     [installLimits, retryLimits, limits].every(l => l.rpcPeak <= 5 && l.timerPeak <= 5),
     [String(t.err || ""), limits, W.schedules]);
+
+// S18. Unsupported and missing values are never substituted or written back.
+for (const [field, value] of [
+    ["TimePeriod", 8], ["TimePeriod", null], ["TimePeriod", ""], ["TimePeriod", "  "],
+    ["HeatingTime", null], ["HeatingTime", ""], ["HeatingTime", "  "],
+    ["InvertedRelay", null], ["InvertedRelay", "false"], ["IsForecastUsed", null],
+    ["AlwaysOnPrice", null], ["AlwaysOffPrice", null], ["HeatingCurve", null],
+    ["Country", null], ["RelayId", null], ["ManualKVS", "true"],
+]) {
+    W = freshWorld(); W.http = priceServer(PRICE);
+    const saved = conf({ [field]: value });
+    W.kvs.SmartHeatingConf1 = saved;
+    W.schedules = [{ id: 41, timespec: "0 0 1 * * *", calls: [] }];
+    W.kvs.SmartHeatingSys1 = JSON.stringify({ ExistingSchedule: 41, Version: 5 });
+    const before = JSON.stringify([W.kvs, W.schedules]);
+    const start = prints.length;
+    t = boot(); t.fcTm();
+    check("S18 " + field + "=" + JSON.stringify(value) + " is reported and preserved",
+        !t.err && JSON.stringify([W.kvs, W.schedules]) === before && W.deleted.length === 0 && W.relayConfigs.length === 0 &&
+        prints.slice(start).some(line => line.includes(field)), [String(t.err || ""), prints.slice(start)]);
+    W.kvs.SmartHeatingConf1 = conf(); t.loop();
+    check("S18 corrected " + field + " resumes scheduling", !t.err && W.schedules.length === 1 && W.schedules[0].id !== 41);
+}
+for (const saved of ["invalid JSON", "null", "{}", "[]"]) {
+    W = freshWorld(); W.http = priceServer(PRICE); W.kvs.SmartHeatingConf1 = saved;
+    t = boot(); t.fcTm();
+    check("S18 malformed configuration " + saved + " is retained without crashing",
+        !t.err && W.kvs.SmartHeatingConf1 === saved && W.relayConfigs.length === 0 && W.schedules.length === 0, String(t.err || ""));
+}
+for (const period of [0, "0", 6, "6", 12, "12", 24, "24"]) {
+    W = freshWorld(); W.http = priceServer(PRICE);
+    const saved = conf({ TimePeriod: period, HeatingTime: 2 }); W.kvs.SmartHeatingConf1 = saved;
+    t = boot(); t.fcTm(); t.stale(); t.loop();
+    const expected = Number(period) === 0 ? null : cheapest(EVE.normal, Number(period), 2, PRICE);
+    check("S18 supported period " + JSON.stringify(period) + " is used without rewriting KVS",
+        !t.err && W.kvs.SmartHeatingConf1 === saved && !W.kvsWrites.includes("SmartHeatingConf1") &&
+        (W.schedules.length ? specHours(W.schedules[0].timespec) : null) === expected, W.schedules);
+}
+W = freshWorld(); W.http = priceServer(() => -20);
+const specialConfig = conf({ HeatingTime: 30, AlwaysOnPrice: -10, AlwaysOffPrice: 600, HeatingCurve: 10 });
+W.kvs.SmartHeatingConf1 = specialConfig;
+t = boot(); t.fcTm();
+check("S18 KVS numeric settings retain their wider ranges", !t.err && W.kvs.SmartHeatingConf1 === specialConfig && W.schedules.length === 1 && specHours(W.schedules[0].timespec).split(",").length === 24);
+
+// S19. A failed read is distinct from a confirmed missing key, including after a successful cycle.
+for (const virtual of [false, true]) {
+    for (const priorSuccess of [false, true]) {
+        vcWorld(); if (!virtual) W.device = { gen: 2, app: "Plus1PM", ver: "1.4.4" };
+        W.kvs.SmartHeatingConf1 = conf({ InvertedRelay: true }); // also force KVS on a VC-capable device
+        t = boot(true);
+        if (priorSuccess) { t.fcTm(); t.flush(); }
+        // Stored values may have changed since the last successful read.
+        const changed = conf({ InvertedRelay: true, HeatingTime: 2, TimePeriod: 12 });
+        W.kvs.SmartHeatingConf1 = changed;
+        W.fail["KVS.Get"] = p => p.key === "SmartHeatingConf1";
+        const before = JSON.stringify([W.kvs, W.schedules, W.vcs, W.relayConfigs]);
+        t.stale(); t.fcTm(); t.flush();
+        const firstError = t.err;
+        t.loop(); t.flush();
+        check("S19 failed read on " + (virtual ? "VC-capable" : "KVS-only") + " device " + (priorSuccess ? "after success" : "at boot") + " changes nothing",
+            !firstError && !t.err && JSON.stringify([W.kvs, W.schedules, W.vcs, W.relayConfigs]) === before,
+            [String(firstError || t.err || ""), W.kvs]);
+        delete W.fail["KVS.Get"]; t.loop(); t.flush();
+        check("S19 next successful read uses current saved settings",
+            !t.err && W.kvs.SmartHeatingConf1 === changed && W.schedules.length === 1 &&
+            specHours(W.schedules[0].timespec) === cheapest(EVE.normal, 12, 2, PRICE) && W.schedules[0].calls[0].params.on === false, W.schedules);
+    }
+}
+W = freshWorld(); W.http = priceServer(PRICE);
+t = boot(); t.fcTm(); t.stale(); t.loop();
+check("S19 confirmed missing KVS config initializes once", !t.err && W.schedules.length === 1 && W.kvsWrites.filter(k => k === "SmartHeatingConf1").length === 1);
+
+// S20. Reject complete foreign sets and a single conflicting control before applying or backing up values.
+for (const badKey of ["all", ...VC_SET.slice(1).map(v => v[0])]) {
+    for (const hasBackup of [false, true]) {
+        vcWorld(); W.pageSize = 3; W.ignoreKeys = true;
+        W.vcs = manyForeign(5).concat(VC_SET.map(e => ({ key: e[0], config: { name: e[1] }, status: { value: e[2] } })));
+        t = boot();
+        if (hasBackup) t.fcTm();
+        for (const v of W.vcs) if (badKey === "all" || v.key === badKey) v.config.name = "Other script's control";
+        W.vcs.find(v => v.key === "boolean:201").status.value = true;
+        const before = JSON.stringify([W.kvs, W.schedules, W.vcs, W.relayConfigs]);
+        t = boot(); t.fcTm();
+        check("S20 foreign " + badKey + (hasBackup ? " with backup" : " without backup") + " is never adopted",
+            !t.err && JSON.stringify([W.kvs, W.schedules, W.vcs, W.relayConfigs]) === before, String(t.err || ""));
+    }
+}
+for (const missing of ["config", "status"]) {
+    vcWorld(); W.vcs = VC_SET.map(e => ({ key: e[0], config: { name: e[1] }, status: { value: e[2] } }));
+    delete W.vcs.find(v => v.key === "boolean:201")[missing];
+    t = boot(); t.fcTm();
+    check("S20 missing " + missing + " blocks adoption without adding or backing up controls", !t.err && W.relayConfigs.length === 0 && W.addAttempts.length === 0 && W.kvs.SmartHeatingVC1 === undefined);
+}
+
+// S21. Even with a backup, present-but-invalid controls cannot silently select zero or stale values.
+for (const key of VC_SET.slice(1).map(v => v[0])) {
+    for (const badValue of [null, ""]) {
+        vcWorld(); W.vcs = VC_SET.map(e => ({ key: e[0], config: { name: e[1] }, status: { value: e[2] } }));
+        t = boot(); t.fcTm();
+        const control = W.vcs.find(v => v.key === key), goodValue = control.status.value;
+        const priorId = W.schedules[0] && W.schedules[0].id;
+        control.status.value = badValue;
+        const before = JSON.stringify([W.kvs, W.schedules, W.vcs, W.relayConfigs]);
+        t = boot(); t.fcTm();
+        check("S21 " + key + "=" + JSON.stringify(badValue) + " preserves the last working configuration",
+            !t.err && JSON.stringify([W.kvs, W.schedules, W.vcs, W.relayConfigs]) === before, String(t.err || ""));
+        control.status.value = goodValue; t.loop();
+        check("S21 restored " + key + " resumes on retry", !t.err && W.schedules.length === 1 && W.schedules[0].id !== priorId && specHours(W.schedules[0].timespec) === cheapest(EVE.normal, 12, 5, PRICE));
+    }
+}
+vcWorld(); W.vcs = VC_SET.map(e => ({ key: e[0], config: { name: e[1] }, status: { value: e[2] } }));
+W.vcs.find(v => v.key === "enum:200").status.value = "0";
+W.vcs.find(v => v.key === "number:200").status.value = 0;
+W.http = priceServer(() => 0);
+t = boot(); t.fcTm();
+check("S21 explicit zero remains valid price-only control", !t.err && W.schedules.length === 1 && specHours(W.schedules[0].timespec).split(",").length === 24 && W.kvs.SmartHeatingVC1 !== undefined);
 
 // =====================================================================
 console.log(failures === 0 ? "\nALL SPEC CHECKS PASSED" : "\n" + failures + " SPEC FAILURES");

@@ -16,8 +16,9 @@ The suite covers:
 - tariff windows and forecast heating limits;
 - offline fallback and recovery from RPC failures;
 - safe schedule replacement and verified relay timers after an update failure;
-- corrupted and string-valued configuration;
-- Virtual Component ownership, filtered and unfiltered pagination;
+- invalid settings and failed reads preserve stored configuration and existing heating, then recover after correction;
+- supported numeric/string periods, explicit zero, and wider KVS numeric ranges;
+- Virtual Component names and values, complete foreign sets, single conflicting controls, filtered and unfiltered pagination;
 - incomplete Virtual Component reads preserve schedules and relay settings when repair cannot be verified;
 - compact backup writes only when control values change, missing-control repair, version-independent reinstall, and recovery from failed additions across retries and restarts;
 - embedded watchdog deletion, concurrency, and flash-write behavior.
@@ -32,8 +33,16 @@ The price server adapts to either supported request convention: an exclusive nex
 
 ## Virtual Component recovery
 
-`SmartHeatingVC<ScriptId>` stores only the nine control values from the last complete valid read (42 bytes of JSON with the defaults). Fresh installation saves its intended values before adding any controls, so interrupted installation can resume. Repair restores missing controls from this backup and leaves surviving values untouched. The backup is refreshed when a complete read detects changes.
+`SmartHeatingVC<ScriptId>` stores only the nine control values from the last complete valid read (42 bytes of JSON with the defaults). Fresh installation saves its intended values before adding any controls, so interrupted installation can resume. Repair restores missing controls from this backup and leaves surviving values untouched. Normal reads also require the expected control names and valid values before applying or backing up any settings. The backup is refreshed when a complete read detects changes.
 
 An incomplete installation without a valid backup, or with a conflicting component name on a reserved ID, is left untouched. Restore the missing controls manually, or remove all reserved controls and restart to reinstall. Reinstallation uses the backup when available and initial defaults otherwise, regardless of the stored script version.
 
 The backup adds a small resident value array and transient serialization/repair allocations. Its serialized size is not a measurement of Shelly RAM usage; measure `mem_used` and `mem_peak` on the target device during both normal scheduling and repair.
+
+## Configuration validation
+
+Supported heating periods remain 0, 6, 12 and 24 hours, including their enum string forms. Null, blank and unsupported settings are reported and left unchanged. Numeric fields require JSON numbers; boolean fields require true or false. KVS price thresholds and heating-curve values retain their wider numeric ranges instead of inheriting UI slider limits.
+
+The script initializes `SmartHeatingConf<ScriptId>` only after a confirmed missing-key response. A failed read or invalid JSON cannot trigger initialization, change relay settings, or replace an existing schedule. Successfully read settings are used without rewriting the configuration key. Fix the reported setting and the normal retry resumes scheduling.
+
+Virtual controls are recognized by their reserved keys, expected names and valid values. Keep the installed control names; if a control is renamed, the error identifies the expected name to restore. This catches conflicting controls, including one conflicting control in an otherwise complete set. It is a collision check, not proof of ownership against another script deliberately using identical keys and names.

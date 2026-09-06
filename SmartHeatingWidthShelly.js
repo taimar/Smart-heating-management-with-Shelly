@@ -119,7 +119,8 @@ let _ = {
     prov: "None",   //network provider name
     newV: 5.0,      //new script version
     sdOk: false,    //system data OK
-    cdOk: false,    //configuration data OK
+    cdOk: false,    //configuration read succeeded this cycle
+    cdMissing: false, //configuration key is confirmed absent
     wdOk: false,    //watchdog code verified since boot
     vcVals: null,   //last complete Virtual Component values, backed up in KVS
     wdId: 0,        //watchdog script ID
@@ -260,13 +261,25 @@ function verC(old, newV) {
     }
     return true; //equal versions meet the minimum requirement
 }
-// Normalize persisted and Virtual Component values before using or storing them.
+// Validate before converting supported numeric enum strings. Never replace invalid settings.
 function normC() {
-    const period = Number(c.tPer);
-    const heat = Number(c.hTim);
-    c.tPer = period === 0 || period === 6 || period === 12 || period === 24 ? period : 24;
-    c.hTim = heat === heat && heat >= 0 ? heat : 10;
-    if (!pack(c.pack, true)) { c.pack = "NONE"; }
+    const problem = cErr(kvsC());
+    if (problem) { rErr("Invalid configuration: " + problem); return false; }
+    c.tPer = Number(c.tPer);
+    return true;
+}
+// Validate a saved configuration before copying any of it into the active settings.
+function cErr(dt) {
+    if (!dt || typeof dt !== "object") { return "expected a configuration object"; }
+    const problem = vErr([
+        typeof dt.TimePeriod === "number" ? "" + dt.TimePeriod : dt.TimePeriod,
+        dt.HeatingTime, dt.IsForecastUsed, dt.EnergyProvider, dt.AlwaysOnPrice,
+        dt.AlwaysOffPrice, dt.InvertedRelay, dt.Country, dt.HeatingCurve
+    ], true);
+    if (problem) { return problem; }
+    if (typeof dt.RelayId !== "number" || dt.RelayId < 0 || dt.RelayId % 1 !== 0) { return "RelayId must be a non-negative integer"; }
+    if (dt.ManualKVS !== undefined && typeof dt.ManualKVS !== "boolean") { return "ManualKVS must be true or false"; }
+    return "";
 }
 // Get KVS ConfigurationData into memory
 function memC(dt) {
@@ -281,7 +294,6 @@ function memC(dt) {
     c.cnty = dt.Country;
     c.hCur = dt.HeatingCurve;
     c.mnKv = typeof dt.ManualKVS === "boolean" ? dt.ManualKVS : c.mnKv;
-    normC();
     return c;
 }
 // ConfigurationData data to KVS store
@@ -316,16 +328,28 @@ function kvsS() {
 }
 // Get KVS ConfigurationData and SystemData
 function gKvs() {
+    _.cdOk = false;
+    _.cdMissing = false;
     cntr = 3;
     Shelly.call('KVS.Get', { key: "SmartHeatingConf" + _.sId },
-        function (res, err) {
+        function (res, err, msg) {
             cntr--;
-            if (err !== 0) {
-                // Failed to get ConfigurationData
+            if (err === -105) { // NOT FOUND: first-time initialization is allowed
+                _.cdMissing = true;
+                _.cdOk = true;
                 return;
             }
-            c = memC(JSON.parse(res.value));
-            _.cdOk = true;
+            if (err !== 0 || !res) {
+                print(_.pId, "Configuration read failed:", msg);
+                return;
+            }
+            try {
+                const saved = JSON.parse(res.value);
+                const problem = cErr(saved);
+                if (problem) { print(_.pId, "Invalid saved configuration:", problem); return; }
+                c = memC(saved);
+                _.cdOk = true;
+            } catch (e) { print(_.pId, "Saved configuration is not valid JSON."); }
         });
 
     Shelly.call('KVS.Get', { key: "SmartHeatingSys" + _.sId },
@@ -352,16 +376,19 @@ function gKvs() {
 
 // Select running mode like KVS or Virtual components
 function inst() {
+    if (!_.cdOk) { rErr("Configuration could not be loaded; stored values and relay settings were left unchanged."); return; }
     if (isVC()) {
         rVc();
     } else {
         print(_.pId, "Script in KVS mode");
-        tKvs();
+        if (_.cdMissing) { tKvs(); }
+        else { main(); }
     }
 }
 
 // Store configuration data to KVS
 function tKvs() {
+    if (!_.cdOk || !_.cdMissing || !normC()) { return; }
     Shelly.call("KVS.set", { key: "SmartHeatingConf" + _.sId, value: JSON.stringify(kvsC()) },
         function (res, err, msg) {
             if (err !== 0) {
@@ -375,16 +402,20 @@ function tKvs() {
 }
 
 // Compact backup order matches rVc's setting map; only complete, valid sets can repair controls.
-function vValid(v) {
-    if (!v || v.length !== 9) { return false; }
-    return (v[0] === "0" || v[0] === "6" || v[0] === "12" || v[0] === "24") &&
-        typeof v[1] === "number" && v[1] >= 0 && v[1] <= 24 &&
-        typeof v[2] === "boolean" && pack(v[3], true) &&
-        typeof v[4] === "number" && v[4] >= 0 && v[4] <= 100 &&
-        typeof v[5] === "number" && v[5] >= 0 && v[5] <= 500 &&
-        typeof v[6] === "boolean" &&
-        (v[7] === "ee" || v[7] === "fi" || v[7] === "lv" || v[7] === "lt") &&
-        typeof v[8] === "number" && v[8] >= -4 && v[8] <= 8;
+function vValid(v) { return vErr(v) === ""; }
+function nOk(v) { return typeof v === "number" && v - v === 0; }
+function vErr(v, kvs) {
+    if (!v || v.length !== 9) { return "expected nine control values"; }
+    if (v[0] !== "0" && v[0] !== "6" && v[0] !== "12" && v[0] !== "24") { return "TimePeriod must be 0, 6, 12 or 24"; }
+    if (!nOk(v[1]) || v[1] < 0 || (!kvs && v[1] > 24)) { return "HeatingTime must be a non-negative number (0 to 24 in virtual controls)"; }
+    if (typeof v[2] !== "boolean") { return "IsForecastUsed must be true or false"; }
+    if (!pack(v[3], true)) { return "EnergyProvider is not a supported network package"; }
+    if (!nOk(v[4]) || (!kvs && !(v[4] >= 0 && v[4] <= 100))) { return "AlwaysOnPrice must be a number (0 to 100 in virtual controls)"; }
+    if (!nOk(v[5]) || (!kvs && !(v[5] >= 0 && v[5] <= 500))) { return "AlwaysOffPrice must be a number (0 to 500 in virtual controls)"; }
+    if (typeof v[6] !== "boolean") { return "InvertedRelay must be true or false"; }
+    if (v[7] !== "ee" && v[7] !== "fi" && v[7] !== "lv" && v[7] !== "lt") { return "Country must be ee, fi, lv or lt"; }
+    if (!nOk(v[8]) || (!kvs && !(v[8] >= -4 && v[8] <= 8))) { return "HeatingCurve must be a number (-4 to 8 in virtual controls)"; }
+    return "";
 }
 // Save only changed values. Fresh installation must save its intended values before adding controls.
 function bVc(values, next, data) {
@@ -483,15 +514,15 @@ function rVc(state) {
         state = {
             offset: 0,
             map: [
-                ["tPer", "enum:200", null, false],
-                ["hTim", "number:200", null, false],
-                ["isFc", "boolean:200", null, false],
-                ["pack", "enum:201", null, false],
-                ["lowR", "number:201", null, false],
-                ["higR", "number:202", null, false],
-                ["Inv", "boolean:201", null, false],
-                ["cnty", "enum:202", null, false],
-                ["hCur", "number:203", null, false]
+                ["tPer", "enum:200", null, false, "Heating Period (h)"],
+                ["hTim", "number:200", null, false, "Min On Time (h/period)"],
+                ["isFc", "boolean:200", null, false, "Forecast Heat"],
+                ["pack", "enum:201", null, false, "Network Package"],
+                ["lowR", "number:201", null, false, "Heat On (min price)"],
+                ["higR", "number:202", null, false, "Heat Off (max price)"],
+                ["Inv", "boolean:201", null, false, "Inverted Relay"],
+                ["cnty", "enum:202", null, false, "Market Price Country"],
+                ["hCur", "number:203", null, false, "Forecast Impact +/-"]
             ],
             keys: []
         };
@@ -500,7 +531,7 @@ function rVc(state) {
     Shelly.call("Shelly.GetComponents", {
         dynamic_only: true,
         keys: state.keys,
-        include: ["status"],
+        include: ["status", "config"],
         offset: state.offset
     }, function (res, err, msg, data) {
         if (err !== 0 || !res || !res.components) {
@@ -512,7 +543,17 @@ function rVc(state) {
         for (let i = 0; i < data.map.length; i++) {
             if (data.map[i][3]) { continue; }
             for (let j = 0; j < comp.length; j++) {
-                if (data.map[i][1] === comp[j].key && comp[j].status && comp[j].status.value !== undefined) {
+                if (data.map[i][1] === comp[j].key) {
+                    if (!comp[j].config || comp[j].config.name !== data.map[i][4]) {
+                        cntr--;
+                        rErr("Virtual Component " + comp[j].key + " has missing configuration or a conflicting name; expected '" + data.map[i][4] + "'.");
+                        return;
+                    }
+                    if (!comp[j].status || comp[j].status.value === undefined) {
+                        cntr--;
+                        rErr("Virtual Component " + comp[j].key + " has no usable value.");
+                        return;
+                    }
                     data.map[i][2] = comp[j].status.value;
                     data.map[i][3] = true;
                     break;
@@ -530,16 +571,15 @@ function rVc(state) {
             if (data.map[i][3]) { found++; }
         }
         const isOk = found === data.map.length;
-        if (isOk) {
-            for (let i = 0; i < data.map.length; i++) { c[data.map[i][0]] = data.map[i][2]; }
-        }
         cntr--;
         if (isOk) {
             const values = [];
             for (let i = 0; i < data.map.length; i++) { values.push(data.map[i][2]); }
+            const problem = vErr(values);
+            if (problem) { rErr("Invalid Virtual Component setting: " + problem); return; }
+            for (let i = 0; i < data.map.length; i++) { c[data.map[i][0]] = data.map[i][2]; }
             print(_.pId, "Virtual Component mode active");
-            if (vValid(values)) { bVc(values, main); }
-            else { main(); }
+            bVc(values, main);
         } else {
             gVc();
         }
@@ -548,7 +588,7 @@ function rVc(state) {
 
 // Main script where all the logic starts.
 function main() {
-    normC();
+    if (!normC()) { return; }
     _.cPer = c.tPer <= 0 ? 0 : Math.ceil((24 * 100) / (c.tPer * 100));  //number of periods in a day
     _.hTim = c.hTim > c.tPer ? c.tPer : c.hTim;                         //heating time can't be more than the period
     //check if Shelly has time

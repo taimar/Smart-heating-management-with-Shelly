@@ -29,7 +29,7 @@ class Date extends RealDate {
 let W;
 function freshWorld() {
     return {
-        kvs: {}, schedules: [], deleted: [], nextId: 5,
+        kvs: {}, schedules: [], deleted: [], nextId: 5, nextScriptId: 9, calls: [],
         scripts: [{ id: 3, name: "watchdog" }], running: { 3: true },
         vcs: [], vDeleted: [], http: null, fail: {}, lastUrl: null,
         putCode: 0, ignoreKeys: false, relayConfigs: [], kvsWrites: [], addAttempts: [],
@@ -45,7 +45,15 @@ const Timer = { set: (ms, rep, cb, d) => { if (!rep) cb(d); return 1; }, clear: 
 const Shelly = {
     getCurrentScriptId: () => 1,
     getDeviceInfo: () => W.device,
-    getComponentConfig: (n) => n === "sys" ? W.sysConfig : n === "switch" ? W.relayConfig : { enable: true },
+    getComponentConfig: (n, id) => {
+        if (n === "sys") return W.sysConfig;
+        if (n === "switch") return W.relayConfig;
+        if (n === "script" && id !== 1) {
+            const script = W.scripts.find(s => s.id === id);
+            return script ? { name: script.name, enable: true } : null;
+        }
+        return { enable: true };
+    },
     getComponentStatus: (n, id) => {
         if (n === "sys") return { unixtime: W.unixtime };
         if (n === "script" && id !== undefined && id !== 1) {
@@ -55,14 +63,15 @@ const Shelly = {
         return { running: true, mem_used: 1, mem_peak: 2 };
     },
     call: (m, p, cb, ud) => {
-        const done = (r, e, s) => { if (cb) cb(r, e || 0, s || "", ud); };
+        W.calls.push({ method: m, params: p });
+        const done = (r, e, s) => { if (W.observe) W.observe(); if (cb) cb(r, e || 0, s || "", ud); };
         if (m === "Virtual.Add") W.addAttempts.push(p.type + ":" + p.id);
         if (W.fail[m] && (typeof W.fail[m] !== "function" || W.fail[m](p))) return done(null, -1, "forced failure");
         switch (m) {
             case "KVS.Get": return W.kvs[p.key] !== undefined ? done({ value: W.kvs[p.key] }, 0) : done(null, -105, "not found");
             case "KVS.set": case "KVS.Set": W.kvsWrites.push(p.key); W.kvs[p.key] = p.value; return done({}, 0);
             case "HTTP.GET": { W.lastUrl = p.url; const r = W.http(p); return done(r[0], r[1], ""); }
-            case "Switch.SetConfig": W.relayConfigs.push(p.config); return done({}, 0);
+            case "Switch.SetConfig": W.relayConfigs.push(p.config); W.relayConfig = Object.assign({}, p.config); return done({}, 0);
             case "Schedule.Delete": {
                 const i = W.schedules.findIndex(s => s.id === p.id);
                 if (i === -1) return done(null, -103, "no such schedule");
@@ -70,12 +79,18 @@ const Shelly = {
             }
             case "Schedule.Create": {
                 const id = W.nextId++;
-                W.schedules.push({ id, timespec: p.timespec, calls: p.calls });
+                W.schedules.push({ id, enable: p.enable !== false, timespec: p.timespec, calls: p.calls });
                 return done({ id }, 0);
             }
-            case "Schedule.List": return done({ jobs: W.schedules.map(s => ({ id: s.id, timespec: s.timespec })) }, 0);
+            case "Schedule.List": return done({ jobs: W.schedules.map(s => Object.assign({}, s)) }, 0);
+            case "Schedule.Update": {
+                const job = W.schedules.find(s => s.id === p.id);
+                if (!job) return done(null, -105, "no such schedule");
+                Object.assign(job, p);
+                return done({ id: p.id }, 0);
+            }
             case "Script.List": return done({ scripts: W.scripts.slice() }, 0);
-            case "Script.Create": { W.scripts.push({ id: 9, name: p.name }); W.running[9] = false; return done({ id: 9 }, 0); }
+            case "Script.Create": { const id = W.nextScriptId++; W.scripts.push({ id, name: p.name }); W.running[id] = false; return done({ id }, 0); }
             case "Script.Stop": W.running[p.id] = false; return done({}, 0);
             case "Script.Start": W.running[p.id] = true; return done({}, 0);
             case "Script.SetConfig": return done({ id: p.id }, 0);
@@ -468,6 +483,7 @@ function preservesSchedule(name, method) {
     t.fcTm();
     const oldId = W.schedules[0].id;
     W.fail[method] = true;
+    if (method === "Switch.SetConfig") W.relayConfig = null; // an existing timer cannot be verified
     t.stale();
     t.loop();
     const preserved = W.schedules.length === 1 && W.schedules[0].id === oldId && W.deleted.indexOf(oldId) === -1;
@@ -831,7 +847,7 @@ for (const inverted of [false, true]) {
 W = freshWorld(); W.kvs.SmartHeatingConf1 = conf(); W.http = priceServer(PRICE);
 t = boot(); t.fcTm();
 const preservedId = W.schedules[0].id;
-W.fail["Switch.SetConfig"] = true;
+W.fail["Switch.SetConfig"] = true; W.relayConfig = null;
 const diagnosticStart = prints.length;
 t.stale(); t.loop();
 check("S16 local error identifies the recorded schedule being preserved", W.schedules[0].id === preservedId && prints.slice(diagnosticStart).some(line => line.includes("Keeping recorded schedule ID " + preservedId + ".")));
@@ -969,6 +985,116 @@ W.vcs.find(v => v.key === "number:200").status.value = 0;
 W.http = priceServer(() => 0);
 t = boot(); t.fcTm();
 check("S21 explicit zero remains valid price-only control", !t.err && W.schedules.length === 1 && specHours(W.schedules[0].timespec).split(",").length === 24 && W.kvs.SmartHeatingVC1 !== undefined);
+
+// S22. A cached watchdog ID is accepted or restarted only while its name still matches.
+for (const change of ["renamed running", "renamed stopped", "reused ID", "deleted", "replacement watchdog"]) {
+    W = freshWorld(); W.kvs.SmartHeatingConf1 = conf(); W.http = priceServer(PRICE);
+    t = boot(true); t.fcTm(); t.flush();
+    if (change === "deleted" || change === "reused ID") W.scripts = W.scripts.filter(s => s.id !== 3);
+    else W.scripts.find(s => s.id === 3).name = "Other automation";
+    if (change === "reused ID") W.scripts.push({ id: 3, name: "Pump controller" });
+    if (change === "replacement watchdog") { W.scripts.push({ id: 4, name: "watchdog" }); W.running[4] = false; }
+    W.running[3] = change === "renamed running";
+    const beforeRunning = W.running[3], start = W.calls.length;
+    t.stale(); t.loop(); t.flush();
+    const foreignWrites = W.calls.slice(start).filter(c => ["Script.Start", "Script.Stop", "Script.PutCode", "Script.SetConfig"].includes(c.method) && c.params.id === 3);
+    const actual = W.scripts.find(s => s.name === "watchdog");
+    check("S22 " + change + ": foreign ID left alone, actual watchdog runs",
+        !t.err && foreignWrites.length === 0 && W.running[3] === beforeRunning && actual && actual.id !== 3 && W.running[actual.id],
+        [String(t.err || ""), foreignWrites.map(c => c.method), W.scripts]);
+}
+
+// S23. Retry the same unsaved SystemData record, including ID zero, without reloading stale state.
+for (const priorRecord of [false, true]) {
+    for (const noHeating of [false, true]) {
+        W = freshWorld(); W.kvs.SmartHeatingConf1 = conf(); W.http = priceServer(PRICE);
+        t = boot(true);
+        if (priorRecord) { t.fcTm(); t.flush(); }
+        W.kvs.SmartHeatingConf1 = conf({ HeatingTime: noHeating ? 0 : 2 });
+        W.fail["KVS.set"] = p => p.key === "SmartHeatingSys1";
+        t.stale(); t.fcTm(); t.flush();
+        const initialError = t.err;
+        const expectedJobs = JSON.stringify(W.schedules);
+        const unsavedId = W.schedules.length ? W.schedules[0].id : 0;
+        const record = W.calls.filter(c => c.method === "KVS.set" && c.params.key === "SmartHeatingSys1").slice(-1)[0].params.value;
+        const start = W.calls.length;
+        // Changes made while persistence is pending must wait, preserving the pending ID.
+        W.kvs.SmartHeatingConf1 = conf({ HeatingTime: 3 });
+        for (let i = 0; i < 3; i++) { t.stale(); t.loop(); t.flush(); }
+        const retries = W.calls.slice(start);
+        const writes = retries.filter(c => c.method === "KVS.set" && c.params.key === "SmartHeatingSys1");
+        check("S23 " + (priorRecord ? "stale" : "missing") + " record, " + (noHeating ? "zero" : "new") + " ID retries once per cycle without other work",
+            !initialError && !t.err && JSON.stringify(W.schedules) === expectedJobs && writes.length === 3 &&
+            writes.every(c => c.params.value === record) && retries.every(c => c.method === "KVS.set"),
+            [String(initialError || t.err || ""), retries.map(c => c.method)]);
+        delete W.fail["KVS.set"]; t.loop(); t.flush();
+        check("S23 successful persistence saves the same ID without creating another schedule",
+            !t.err && W.kvs.SmartHeatingSys1 !== undefined && JSON.parse(W.kvs.SmartHeatingSys1).ExistingSchedule === unsavedId && JSON.stringify(W.schedules) === expectedJobs,
+            [W.kvs.SmartHeatingSys1, W.schedules]);
+        t.loop(); t.flush();
+        check("S23 normal calculation resumes after saving, with no orphan schedule",
+            !t.err && W.schedules.length === 1 && specHours(W.schedules[0].timespec) === cheapest(EVE.normal, 24, 3, PRICE), W.schedules);
+    }
+}
+
+// S24. Keep the old schedule and timer compatible through every failed polarity-transition step.
+for (const inverted of [false, true]) {
+    for (const failStep of ["Schedule.List", "Schedule.Update", "Switch.SetConfig", "Schedule.Delete", "Schedule.Create", null]) {
+        W = freshWorld(); W.kvs.SmartHeatingConf1 = conf({ InvertedRelay: inverted }); W.http = priceServer(PRICE);
+        t = boot(true); t.fcTm(); t.flush();
+        const oldId = W.schedules[0].id, oldTimer = JSON.stringify(W.relayConfig);
+        const oldEndTimer = inverted ? "auto_on" : "auto_off";
+        let mismatches = 0;
+        W.observe = () => {
+            const old = W.schedules.find(s => s.id === oldId);
+            if (old && old.enable && !W.relayConfig[oldEndTimer]) mismatches++;
+        };
+        W.kvs.SmartHeatingConf1 = conf({ InvertedRelay: !inverted });
+        if (failStep) W.fail[failStep] = true;
+        const start = W.calls.length;
+        t.stale(); t.loop();
+        const limits = t.flush();
+        const beforeDisable = failStep === "Schedule.List" || failStep === "Schedule.Update";
+        const active = W.schedules.filter(s => s.enable);
+        const old = W.schedules.find(s => s.id === oldId);
+        const expectedState = beforeDisable
+            ? old && old.enable && JSON.stringify(W.relayConfig) === oldTimer
+            : failStep ? active.length === 0 : active.length === 1 && active[0].id !== oldId && active[0].calls[0].params.on === inverted;
+        check("S24 " + inverted + " -> " + !inverted + ", " + (failStep || "success") + ": old schedule never loses its end timer while enabled",
+            !t.err && mismatches === 0 && expectedState && limits.rpcPeak <= 5 && limits.timerPeak <= 5,
+            [String(t.err || ""), mismatches, W.schedules, W.relayConfig]);
+        if (!failStep) {
+            const calls = W.calls.slice(start).map(c => c.method);
+            check("S24 successful transition disables before timer update and replacement",
+                calls.indexOf("Schedule.Update") < calls.indexOf("Switch.SetConfig") && calls.indexOf("Switch.SetConfig") < calls.indexOf("Schedule.Delete") &&
+                calls.indexOf("Schedule.Delete") < calls.indexOf("Schedule.Create"), calls);
+        } else {
+            delete W.fail[failStep]; t.loop(); t.flush();
+            check("S24 " + failStep + " recovers on retry with only the new-polarity schedule",
+                !t.err && mismatches === 0 && W.schedules.length === 1 && W.schedules[0].enable && W.schedules[0].calls[0].params.on === inverted,
+                [String(t.err || ""), W.schedules]);
+        }
+    }
+}
+// A restart after disabling must not re-enable the incompatible schedule.
+W = freshWorld(); W.kvs.SmartHeatingConf1 = conf(); W.http = priceServer(PRICE);
+t = boot(true); t.fcTm(); t.flush();
+W.kvs.SmartHeatingConf1 = conf({ InvertedRelay: true }); W.fail["Schedule.Delete"] = true;
+t.stale(); t.loop(); t.flush();
+const disabledId = W.schedules[0].id;
+t = boot(true); t.fcTm(); t.flush();
+check("S24 disabled schedule remains disabled across restart and another deletion failure", !t.err && W.schedules.length === 1 && W.schedules[0].id === disabledId && W.schedules[0].enable === false);
+delete W.fail["Schedule.Delete"]; t.loop(); t.flush();
+check("S24 restarted transition finishes after deletion recovers", !t.err && W.schedules.length === 1 && W.schedules[0].id !== disabledId && W.schedules[0].enable && W.schedules[0].calls[0].params.on === false);
+
+// Ordinary same-polarity recalculation keeps the working schedule enabled if deletion fails.
+W = freshWorld(); W.kvs.SmartHeatingConf1 = conf(); W.http = priceServer(PRICE);
+t = boot(); t.fcTm();
+const stableId = W.schedules[0].id;
+W.fail["Schedule.Delete"] = true;
+const stableStart = W.calls.length;
+t.stale(); t.loop();
+check("S24 same polarity does not disable the working schedule", !t.err && W.schedules[0].id === stableId && W.schedules[0].enable && !W.calls.slice(stableStart).some(c => c.method === "Schedule.Update"));
 
 // =====================================================================
 console.log(failures === 0 ? "\nALL SPEC CHECKS PASSED" : "\n" + failures + " SPEC FAILURES");

@@ -115,6 +115,7 @@ let _ = {
     sId: Shelly.getCurrentScriptId(),               //script ID
     pId: "Id" + Shelly.getCurrentScriptId() + ": ", //print ID
     scId: '',       //schedule ID
+    sysPending: false, //new schedule ID still needs to be saved
     manu: false,    //manual heating flag
     prov: "None",   //network provider name
     newV: 5.0,      //new script version
@@ -875,8 +876,34 @@ function fFee(epoch, p) {
     }
 }
 
-// Set countdown timer to flip Shelly status
+// Check the old schedule's actual relay command before changing its timer.
 function fTmr(eler) {
+    if (!(s.exSc > 0)) { sTmr(eler); return; }
+    Shelly.call("Schedule.List", null, function (res, err, msg, data) {
+        if (err !== 0 || !res || !res.jobs) { rErr("Cannot check the existing schedule before updating its timer: " + msg); return; }
+        for (let i = 0; i < res.jobs.length; i++) {
+            const job = res.jobs[i];
+            if (job.id !== s.exSc) { continue; }
+            const call = job.calls && job.calls.length === 1 ? job.calls[0] : null;
+            res = null; //release the other jobs before sending the next RPC
+            if (job.enable === false || (call && call.method === "Switch.Set" && call.params &&
+                call.params.id === c.rId && call.params.on === !c.Inv)) {
+                sTmr(data);
+            } else {
+                Shelly.call("Schedule.Update", { id: job.id, enable: false }, function (res, err, msg, hours) {
+                    if (err !== 0) { rErr("Cannot disable the old schedule before changing relay polarity: " + msg); return; }
+                    print(_.pId, "Old schedule disabled before changing relay polarity; it will stay disabled if replacement fails.");
+                    sTmr(hours);
+                }, data);
+            }
+            return;
+        }
+        s.exSc = 0; //the recorded schedule is already absent
+        sTmr(data);
+    }, eler);
+}
+// Set countdown timer to flip Shelly status after any incompatible schedule is disabled.
+function sTmr(eler) {
     const timr = c.tmr * 60 + 10; //+10sec to remove flap between continous heating hours
     Shelly.call("Switch.SetConfig", {
         id: c.rId,
@@ -980,19 +1007,31 @@ function fScd(eler) {
     wait(fKvs);
 }
 
-// Store the schedulerID, version and last calculation to KVS to have them in case of power outage
+// Keep the new ID in memory until it is saved; later cycles retry this write before reading stale KVS.
 function fKvs() {
-    cntr = 1;
     s.last = new Date().toString();
     s.exSc = _.scId;
     s.vers = _.newV;
+    _.sysPending = true;
+    pSys();
+}
+function pSys() {
+    cntr = 1;
     Shelly.call("KVS.set", { key: "SmartHeatingSys" + _.sId, value: JSON.stringify(kvsS()) },
-        function () {
+        function (res, err, msg) {
             cntr--;
+            if (err !== 0) {
+                print(_.pId, "Schedule ID", s.exSc, "could not be saved:", msg,
+                    "Retrying the same record in", _.freq / 60, "min; schedule replacement is paused.");
+                _.isLp = false;
+                return;
+            }
+            _.sysPending = false;
+            s.last = null;
+            print(_.pId, "Script v", _.newV, (s.exSc > 0 ? " saved schedule ID:" + s.exSc : " saved no heating schedule") +
+                ", next heating calculation at", nxHr(1) + (_.updD < 10 ? ":0" : ":") + _.updD);
+            f_Wd();
         });
-    s.last = null;
-    print(_.pId, "Script v", _.newV, (_.scId > 0 ? " created a schedule with ID:" + _.scId : "") + ", next heating calculation at", nxHr(1) + (_.updD < 10 ? ":0" : ":") + _.updD);
-    wait(f_Wd);
 }
 
 //if the internet is not working or Elering is down
@@ -1110,6 +1149,7 @@ function loop() {
         return;
     }
     _.isLp = true;
+    if (_.sysPending) { pSys(); return; }
     if (updt(_.tsPr) || c.isFc && updt(_.tsFc)) {   //check if the prices or forecast needs to be updated
         strt();                                     //start the program
     } else {
@@ -1145,7 +1185,8 @@ function fcTm() {
 /** find watchdog script ID */
 function f_Wd() {
     if (_.wdOk) {
-        const status = Shelly.getComponentStatus("script", _.wdId);
+        const config = Shelly.getComponentConfig("script", _.wdId);
+        const status = config && config.name === "watchdog" ? Shelly.getComponentStatus("script", _.wdId) : null;
         if (status && status.running) {
             _.isLp = false;
             return;

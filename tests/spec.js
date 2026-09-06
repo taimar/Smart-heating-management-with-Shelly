@@ -32,7 +32,7 @@ function freshWorld() {
         kvs: {}, schedules: [], deleted: [], nextId: 5,
         scripts: [{ id: 3, name: "watchdog" }], running: { 3: true },
         vcs: [], vDeleted: [], http: null, fail: {}, lastUrl: null,
-        putCode: 0, ignoreKeys: false, relayConfigs: [],
+        putCode: 0, ignoreKeys: false, relayConfigs: [], kvsWrites: [], addAttempts: [],
         device: { gen: 2, app: "Plus1PM", ver: "1.4.4" },
         sysConfig: { location: { lat: 59.44, lon: 24.75 } },
         unixtime: FIXED_MS / 1000,
@@ -45,7 +45,7 @@ const Timer = { set: (ms, rep, cb, d) => { if (!rep) cb(d); return 1; }, clear: 
 const Shelly = {
     getCurrentScriptId: () => 1,
     getDeviceInfo: () => W.device,
-    getComponentConfig: (n) => n === "sys" ? W.sysConfig : { enable: true },
+    getComponentConfig: (n) => n === "sys" ? W.sysConfig : n === "switch" ? W.relayConfig : { enable: true },
     getComponentStatus: (n, id) => {
         if (n === "sys") return { unixtime: W.unixtime };
         if (n === "script" && id !== undefined && id !== 1) {
@@ -56,10 +56,11 @@ const Shelly = {
     },
     call: (m, p, cb, ud) => {
         const done = (r, e, s) => { if (cb) cb(r, e || 0, s || "", ud); };
-        if (W.fail[m]) return done(null, -1, "forced failure");
+        if (m === "Virtual.Add") W.addAttempts.push(p.type + ":" + p.id);
+        if (W.fail[m] && (typeof W.fail[m] !== "function" || W.fail[m](p))) return done(null, -1, "forced failure");
         switch (m) {
             case "KVS.Get": return W.kvs[p.key] !== undefined ? done({ value: W.kvs[p.key] }, 0) : done(null, -105, "not found");
-            case "KVS.set": case "KVS.Set": W.kvs[p.key] = p.value; return done({}, 0);
+            case "KVS.set": case "KVS.Set": W.kvsWrites.push(p.key); W.kvs[p.key] = p.value; return done({}, 0);
             case "HTTP.GET": { W.lastUrl = p.url; const r = W.http(p); return done(r[0], r[1], ""); }
             case "Switch.SetConfig": W.relayConfigs.push(p.config); return done({}, 0);
             case "Schedule.Delete": {
@@ -103,8 +104,25 @@ const Shelly = {
 };
 // Each candidate runs in its own VM context. A hung parser or loop becomes a
 // scenario failure instead of stopping the rest of the suite.
-function boot() {
-    const ctx = vm.createContext({ Shelly, Timer, print, atob, Date, console: { log: print } });
+function boot(queued) {
+    const queue = [], timers = new Set();
+    let now = 0, nextTimer = 0, rpcCount = 0, rpcPeak = 0, timerPeak = 0;
+    const asyncShelly = Object.assign({}, Shelly, { call: (m, p, cb, ud) => {
+        rpcCount++; rpcPeak = Math.max(rpcPeak, rpcCount);
+        queue.push({ at: now + 10, run: () => { rpcCount--; Shelly.call(m, p, cb, ud); } });
+    } });
+    const asyncTimer = {
+        set: (ms, rep, cb, data) => {
+            const id = ++nextTimer;
+            timers.add(id); timerPeak = Math.max(timerPeak, timers.size);
+            if (!rep) queue.push({ at: now + ms, run: () => {
+                if (timers.delete(id)) cb(data);
+            } });
+            return id;
+        },
+        clear: id => timers.delete(id),
+    };
+    const ctx = vm.createContext({ Shelly: queued ? asyncShelly : Shelly, Timer: queued ? asyncTimer : Timer, print, atob, Date, console: { log: print } });
     const t = {
         err: null,
         drive: (code) => {
@@ -112,6 +130,17 @@ function boot() {
             try { return vm.runInContext(code, ctx, { timeout: 3000 }); }
             catch (e) { t.err = e; return undefined; }
         },
+    };
+    t.flush = () => {
+        let steps = 0;
+        while (queue.length && !t.err && steps++ < 500) {
+            queue.sort((a, b) => a.at - b.at);
+            const event = queue.shift(); now = event.at;
+            ctx.runCallback = event.run;
+            t.drive("runCallback()");
+        }
+        if (queue.length && !t.err) t.err = new Error("Asynchronous work did not settle");
+        return { rpcPeak, timerPeak };
     };
     t.drive(SRC);
     t.fcTm = () => t.drive("fcTm()");
@@ -339,7 +368,7 @@ check("S7b transient VC read never yields a defaults schedule", !everDefault && 
 }
 
 // S7c. Missing SystemData must recover a complete VC configuration immediately,
-// install only when no reserved controls exist, and leave partial sets untouched.
+// install when no reserved controls exist, and leave unverified partial sets untouched.
 W = freshWorld();
 W.device = { gen: 3, app: "Mini1G3", ver: "1.4.4" };
 W.vcs = VC_SET.map(e => ({ key: e[0], config: { name: e[1] }, status: { value: e[2] } }));
@@ -636,6 +665,197 @@ t.stale();
 t.loop();
 check("S13 watchdog is written once and restarted without a rewrite", noRewriteWhileRunning && W.putCode === 1 && W.running[3] === true,
     [W.putCode, W.running]);
+
+// S14. Every mid-row truncation must terminate, fall back, then recover next cycle.
+function changeCsv(transform, opts) {
+    return p => {
+        const r = priceServer(PRICE, opts)(p);
+        r[0].body_b64 = Buffer.from(transform(atob(r[0].body_b64)), "latin1").toString("base64");
+        return r;
+    };
+}
+for (const lastRow of [false, true]) {
+    const bad = [];
+    // The fixture's quoted row is 24 characters long, including all three fields.
+    for (let cut = 0; cut < 24; cut++) {
+        W = freshWorld();
+        W.kvs.SmartHeatingConf1 = conf();
+        W.http = changeCsv(csv => {
+            const start = lastRow ? csv.lastIndexOf("\n", csv.length - 2) + 1 : csv.indexOf("\n") + 1;
+            return csv.slice(0, start + cut);
+        });
+        t = boot(); t.fcTm();
+        const fallback = !t.err && W.schedules.length === 1 && specHours(W.schedules[0].timespec) === FALLBACK;
+        W.http = priceServer(PRICE);
+        t.loop();
+        if (!fallback || t.err || W.schedules.length !== 1 || specHours(W.schedules[0].timespec) !== cheapest(EVE.normal, 24, 10, PRICE)) bad.push(cut);
+    }
+    check("S14 all truncation offsets in " + (lastRow ? "last" : "first") + " row terminate, fall back and recover", bad.length === 0, bad);
+}
+for (const [name, transform] of [
+    ["CRLF", csv => csv.replace(/\n/g, "\r\n")],
+    ["CRLF without final newline", csv => csv.trimEnd().replace(/\n/g, "\r\n")],
+]) {
+    W = freshWorld(); W.kvs.SmartHeatingConf1 = conf(); W.http = changeCsv(transform);
+    t = boot(); t.fcTm();
+    check("S14 " + name + " gives correct hours", !t.err && W.schedules.length === 1 && specHours(W.schedules[0].timespec) === cheapest(EVE.normal, 24, 10, PRICE), String(t.err || ""));
+}
+for (const [name, transform] of [
+    ["missing price quote", csv => csv.replace(';"10,00"', ';"10,00')],
+    ["nonnumeric price", csv => csv.replace('"10,00"', '"unknown"')],
+    ["infinite price", csv => csv.replace('"10,00"', '"Infinity"')],
+    ["duplicate quarter with correct row count", csv => { const rows = csv.split("\n"); rows[2] = rows[1]; return rows.join("\n"); }],
+    ["missing quarter", csv => { const rows = csv.split("\n"); rows.splice(2, 1); return rows.join("\n"); }],
+]) {
+    W = freshWorld(); W.kvs.SmartHeatingConf1 = conf(); W.http = changeCsv(transform);
+    t = boot(); t.fcTm();
+    check("S14 " + name + " falls back", !t.err && W.schedules.length === 1 && specHours(W.schedules[0].timespec) === FALLBACK, String(t.err || ""));
+}
+W = freshWorld(); W.kvs.SmartHeatingConf1 = conf(); W.http = priceServer(PRICE, { hourly: true });
+t = boot(); t.fcTm();
+check("S14 hourly rows still require offline fallback", !t.err && W.schedules.length === 1 && specHours(W.schedules[0].timespec) === FALLBACK);
+
+// S15. A failed addition is retried without duplicating or resetting surviving controls.
+function vcWorld() {
+    W = freshWorld();
+    W.device = { gen: 3, app: "Mini1G3", ver: "1.4.4" };
+    W.http = priceServer(PRICE);
+}
+for (const key of VC_SET.map(e => e[0])) {
+    vcWorld();
+    W.fail["Virtual.Add"] = p => p.type + ":" + p.id === key;
+    t = boot(); t.fcTm();
+    const saved = W.kvs.SmartHeatingVC1;
+    const survivors = JSON.stringify(W.vcs);
+    const count = W.addAttempts.length;
+    t.loop();
+    const bounded = W.addAttempts.length === count + 1 && JSON.stringify(W.vcs) === survivors;
+    delete W.fail["Virtual.Add"];
+    t = boot(); t.fcTm(); // persistent backup also survives script restarts
+    check("S15 failed " + key + " resumes across retry and restart",
+        saved !== undefined && bounded && !t.err && W.vcs.length === VC_SET.length &&
+        new Set(W.vcs.map(v => v.key)).size === VC_SET.length && W.vDeleted.length === 0 && W.schedules.length === 1,
+        [String(t.err || ""), W.addAttempts]);
+}
+for (const keepBackup of [false, true]) {
+    vcWorld(); t = boot(); t.fcTm();
+    W.vcs = [];
+    if (!keepBackup) delete W.kvs.SmartHeatingVC1;
+    t = boot(); t.fcTm();
+    check("S15 version 5 reinstall " + (keepBackup ? "with" : "without") + " backup",
+        !t.err && W.vcs.length === VC_SET.length && W.schedules.length === 1 && W.vDeleted.length === 0,
+        [String(t.err || ""), W.vcs.length]);
+}
+
+// Capture a complete user's settings, then remove each control in turn.
+for (const missing of VC_SET.slice(1).map(e => e[0])) {
+    vcWorld();
+    W.pageSize = 3;
+    W.ignoreKeys = true;
+    W.vcs = manyForeign(4).concat(VC_SET.map(e => ({
+        key: e[0], config: { name: e[1] }, status: { value: e[0] === "boolean:201" ? true : e[2] },
+    })));
+    t = boot(); t.fcTm();
+    const value = W.vcs.find(v => v.key === missing).status.value;
+    W.vcs = W.vcs.filter(v => v.key !== missing);
+    // A surviving setting changed since backup must be retained.
+    if (missing !== "number:200") W.vcs.find(v => v.key === "number:200").status.value = 2;
+    const survivors = JSON.stringify(W.vcs);
+    t = boot(); t.fcTm();
+    const restored = W.vcs.find(v => v.key === missing);
+    const schedule = W.schedules[0];
+    check("S15 missing " + missing + " restores its saved value without changing survivors",
+        !t.err && restored && restored.status.value === value && JSON.stringify(W.vcs.filter(v => v.key !== missing)) === survivors &&
+        W.vDeleted.length === 0 && W.schedules.length === 1 && schedule.calls[0].params.on === false &&
+        specHours(schedule.timespec) === cheapest(EVE.normal, 12, missing === "number:200" ? 5 : 2, PRICE),
+        [String(t.err || ""), restored, schedule]);
+}
+vcWorld();
+W.fail["KVS.set"] = p => p.key === "SmartHeatingVC1";
+t = boot(); t.fcTm();
+check("S15 new installation waits for persistent recovery data", !t.err && W.addAttempts.length === 0 && W.schedules.length === 0);
+delete W.fail["KVS.set"]; t.loop();
+check("S15 installation recovers after backup write failure", !t.err && W.vcs.length === VC_SET.length && W.schedules.length === 1);
+
+vcWorld();
+W.vcs = VC_SET.map(e => ({ key: e[0], config: { name: e[1] }, status: { value: e[2] } }));
+W.fail["KVS.set"] = p => p.key === "SmartHeatingVC1";
+t = boot(); t.fcTm();
+check("S15 backup write failure does not block complete usable controls", !t.err && W.schedules.length === 1 && specHours(W.schedules[0].timespec) === cheapest(EVE.normal, 12, 5, PRICE));
+
+vcWorld(); t = boot(); t.fcTm();
+const backupWrites = () => W.kvsWrites.filter(key => key === "SmartHeatingVC1").length;
+const initialWrites = backupWrites();
+t.stale(); t.loop(); t = boot(); t.fcTm();
+check("S15 unchanged backup is not rewritten across cycles or restarts", initialWrites === 1 && backupWrites() === initialWrites, W.kvsWrites);
+W.vcs.find(v => v.key === "number:200").status.value = 2;
+t.stale(); t.loop();
+check("S15 changed values update the compact backup once", backupWrites() === initialWrites + 1 && JSON.parse(W.kvs.SmartHeatingVC1)[1] === 2 && Buffer.byteLength(W.kvs.SmartHeatingVC1) <= 253, W.kvs.SmartHeatingVC1);
+
+for (const invalidBackup of [false, true]) {
+    vcWorld(); t = boot(); t.fcTm();
+    W.vcs = W.vcs.filter(v => v.key !== "boolean:201");
+    if (invalidBackup) W.kvs.SmartHeatingVC1 = "invalid JSON";
+    else W.vcs.find(v => v.key === "enum:200").config.name = "Other thermostat";
+    const before = JSON.stringify([W.vcs, W.schedules, W.kvs]);
+    t = boot(); t.fcTm();
+    check("S15 " + (invalidBackup ? "invalid backup" : "foreign reserved control") + " blocks unsafe repair",
+        !t.err && JSON.stringify([W.vcs, W.schedules, W.kvs]) === before && W.vDeleted.length === 0, String(t.err || ""));
+}
+
+// S16. A failed timer update may proceed only with a verified equivalent existing timer.
+for (const inverted of [false, true]) {
+    for (const offline of [false, true]) {
+        W = freshWorld(); W.kvs.SmartHeatingConf1 = conf({ InvertedRelay: inverted });
+        W.http = offline ? () => [null, -114] : priceServer(PRICE);
+        W.fail["Switch.SetConfig"] = true;
+        W.relayConfig = { auto_on: inverted, auto_off: !inverted, auto_on_delay: 3610, auto_off_delay: 3610 };
+        t = boot(); t.fcTm();
+        check("S16 verified " + (inverted ? "inverted" : "normal") + " timer permits " + (offline ? "fallback" : "price") + " schedule",
+            !t.err && W.schedules.length === 1 && W.schedules[0].calls[0].params.on === !inverted &&
+            specHours(W.schedules[0].timespec) === (offline ? FALLBACK : cheapest(EVE.normal, 24, 10, PRICE)), W.schedules);
+    }
+}
+for (const inverted of [false, true]) {
+    for (const wrong of ["polarity", "delay", "unavailable"]) {
+        W = freshWorld(); W.kvs.SmartHeatingConf1 = conf({ InvertedRelay: inverted });
+        W.http = priceServer(PRICE); W.fail["Switch.SetConfig"] = true;
+        W.relayConfig = { auto_on: inverted, auto_off: !inverted, auto_on_delay: 3610, auto_off_delay: 3610 };
+        if (wrong === "polarity") W.relayConfig.auto_on = !inverted;
+        if (wrong === "delay") W.relayConfig[inverted ? "auto_on_delay" : "auto_off_delay"] = 0;
+        if (wrong === "unavailable") W.relayConfig = null;
+        const start = prints.length;
+        t = boot(); t.fcTm();
+        check("S16 " + (inverted ? "inverted" : "normal") + " timer " + wrong + " blocks new heating with accurate diagnostic",
+            !t.err && W.schedules.length === 0 && prints.slice(start).some(line => line.includes("No heating schedule is recorded")),
+            [String(t.err || ""), prints.slice(start)]);
+    }
+}
+W = freshWorld(); W.kvs.SmartHeatingConf1 = conf(); W.http = priceServer(PRICE);
+t = boot(); t.fcTm();
+const preservedId = W.schedules[0].id;
+W.fail["Switch.SetConfig"] = true;
+const diagnosticStart = prints.length;
+t.stale(); t.loop();
+check("S16 local error identifies the recorded schedule being preserved", W.schedules[0].id === preservedId && prints.slice(diagnosticStart).some(line => line.includes("Keeping recorded schedule ID " + preservedId + ".")));
+
+// S17. Queue RPCs and timers as on the device, including a failed install and repair.
+vcWorld(); W.pageSize = 3; W.ignoreKeys = true; W.vcs = manyForeign(5);
+W.fail["Virtual.Add"] = p => p.type === "boolean" && p.id === 201;
+t = boot(true); t.fcTm(); const installLimits = t.flush();
+const failedInstallStopped = !t.err && W.schedules.length === 0;
+delete W.fail["Virtual.Add"]; t.loop(); const retryLimits = t.flush();
+const installedAsync = !t.err && W.vcs.length === 15 && W.schedules.length === 1;
+W.vcs.find(v => v.key === "boolean:201").status.value = true;
+t.stale(); t.loop(); t.flush();
+W.vcs = W.vcs.filter(v => v.key !== "boolean:201");
+t = boot(true); t.fcTm();
+const limits = t.flush();
+check("S17 asynchronous install retry and restart repair finish within RPC/timer limits",
+    failedInstallStopped && installedAsync && !t.err && W.schedules.length === 1 &&
+    W.schedules[0].calls[0].params.on === false && W.vcs.length === 15 && W.vDeleted.length === 0 &&
+    [installLimits, retryLimits, limits].every(l => l.rpcPeak <= 5 && l.timerPeak <= 5),
+    [String(t.err || ""), limits, W.schedules]);
 
 // =====================================================================
 console.log(failures === 0 ? "\nALL SPEC CHECKS PASSED" : "\n" + failures + " SPEC FAILURES");

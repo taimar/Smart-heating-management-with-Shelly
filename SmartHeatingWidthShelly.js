@@ -121,6 +121,7 @@ let _ = {
     sdOk: false,    //system data OK
     cdOk: false,    //configuration data OK
     wdOk: false,    //watchdog code verified since boot
+    vcVals: null,   //last complete Virtual Component values, backed up in KVS
     wdId: 0,        //watchdog script ID
 };
 let cntr = 0;    //counter for async functions
@@ -315,7 +316,7 @@ function kvsS() {
 }
 // Get KVS ConfigurationData and SystemData
 function gKvs() {
-    cntr = 2;
+    cntr = 3;
     Shelly.call('KVS.Get', { key: "SmartHeatingConf" + _.sId },
         function (res, err) {
             cntr--;
@@ -337,18 +338,22 @@ function gKvs() {
             s = memS(JSON.parse(res.value));
             _.sdOk = true;
         });
+    Shelly.call('KVS.Get', { key: "SmartHeatingVC" + _.sId }, function (res, err) {
+        if (err === 0 && res) {
+            try {
+                const values = JSON.parse(res.value);
+                if (vValid(values)) { _.vcVals = values; }
+            } catch (e) { print(_.pId, "Ignoring invalid Virtual Component backup."); }
+        }
+        cntr--;
+    });
     wait(inst);
 }
 
 // Select running mode like KVS or Virtual components
 function inst() {
     if (isVC()) {
-        if (_.sdOk && !(s.vers < 4.2)) {
-            rVc();
-        } else {
-            print(_.pId, "SystemData is missing or outdated; checking existing Virtual Components.");
-            rVc({ recover: true });
-        }
+        rVc();
     } else {
         print(_.pId, "Script in KVS mode");
         tKvs();
@@ -369,70 +374,82 @@ function tKvs() {
     main();
 }
 
-// Install Virtual Components only after every response page confirms that the reserved keys are free.
+// Compact backup order matches rVc's setting map; only complete, valid sets can repair controls.
+function vValid(v) {
+    if (!v || v.length !== 9) { return false; }
+    return (v[0] === "0" || v[0] === "6" || v[0] === "12" || v[0] === "24") &&
+        typeof v[1] === "number" && v[1] >= 0 && v[1] <= 24 &&
+        typeof v[2] === "boolean" && pack(v[3], true) &&
+        typeof v[4] === "number" && v[4] >= 0 && v[4] <= 100 &&
+        typeof v[5] === "number" && v[5] >= 0 && v[5] <= 500 &&
+        typeof v[6] === "boolean" &&
+        (v[7] === "ee" || v[7] === "fi" || v[7] === "lv" || v[7] === "lt") &&
+        typeof v[8] === "number" && v[8] >= -4 && v[8] <= 8;
+}
+// Save only changed values. Fresh installation must save its intended values before adding controls.
+function bVc(values, next, data) {
+    const text = JSON.stringify(values);
+    if (_.vcVals && JSON.stringify(_.vcVals) === text) { next(data); return; }
+    Shelly.call("KVS.set", { key: "SmartHeatingVC" + _.sId, value: text }, function (res, err, msg, saved) {
+        if (err === 0) { _.vcVals = saved.values; }
+        else if (saved.next !== main) { rErr("Cannot save Virtual Component recovery data: " + msg); return; }
+        else { print(_.pId, "Virtual Component backup failed; current complete controls will still be used:", msg); }
+        saved.next(saved.data);
+    }, { values: values, next: next, data: data });
+}
+// Check all reserved slots before adding only missing controls. Never delete or reset surviving controls.
 function gVc(state) {
-    if (!state || typeof state !== "object" || state.offset === undefined) {
-        state = {
-            offset: 0,
-            keys: ["group:200", "enum:200", "number:200", "enum:201", "number:201", "number:202", "boolean:201", "enum:202", "boolean:200", "number:203"]
-        };
+    if (!state || state.offset === undefined) {
+        state = { offset: 0, defs: dtVc(), keys: [], present: [] };
+        for (let i = 0; i < state.defs.length; i++) {
+            state.keys.push(state.defs[i].type + ":" + state.defs[i].id);
+            state.present.push(false);
+        }
     }
     Shelly.call("Shelly.GetComponents", {
-        dynamic_only: true,
-        keys: state.keys,
-        offset: state.offset
+        dynamic_only: true, keys: state.keys, include: ["config"], offset: state.offset
     }, function (res, err, msg, data) {
-        if (err !== 0 || !res || !res.components) {
-            print(_.pId, "Failed to get virtual components: " + msg);
-            print(_.pId, "Using KVS mode for this run.");
-            tKvs();
-            return;
-        }
+        if (err !== 0 || !res || !res.components) { rErr("Cannot inspect Virtual Components: " + msg); return; }
         const comp = res.components;
         for (let i = 0; i < comp.length; i++) {
-            if (data.keys.indexOf(comp[i].key) !== -1) {
-                print(_.pId, "Reserved virtual component slots are already in use. Existing components were left unchanged.");
-                print(_.pId, "Using KVS mode for this run.");
-                tKvs();
+            const n = data.keys.indexOf(comp[i].key);
+            if (n < 0) { continue; }
+            if (!_.vcVals || !comp[i].config || comp[i].config.name !== data.defs[n].config.name) {
+                rErr("Cannot safely repair incomplete Virtual Components in occupied slots. Restore missing controls, or remove all reserved IDs and restart. To use KVS instead, set ManualKVS=true.");
                 return;
             }
+            data.present[n] = true;
         }
         const next = (typeof res.offset === "number" ? res.offset : data.offset) + comp.length;
-        if (typeof res.total === "number" && next < res.total && comp.length > 0) {
-            data.offset = next;
-            gVc(data);
-        } else if (typeof res.total !== "number" && comp.length > 0) {
-            // Without a count we cannot prove that a later page does not contain a collision.
-            print(_.pId, "Virtual component response could not be counted. Existing components were left unchanged.");
-            print(_.pId, "Using KVS mode for this run.");
-            tKvs();
-        } else {
-            aVc(dtVc());
+        if (typeof res.total !== "number" || (next < res.total && comp.length === 0)) {
+            rErr("Virtual Component inventory is incomplete; repair postponed."); return;
         }
+        if (next < res.total) { data.offset = next; gVc(data); return; }
+        // dtVc uses UI order; backups use the rVc map order.
+        const order = [-1, 0, 1, 3, 4, 5, 6, 7, 2, 8];
+        const values = _.vcVals || [];
+        const missing = [];
+        for (let i = 0; i < data.defs.length; i++) {
+            if (i > 0) {
+                if (_.vcVals) { data.defs[i].config.default_value = values[order[i]]; }
+                else { values[order[i]] = data.defs[i].config.default_value; }
+            }
+            if (!data.present[i]) { missing.push(data.defs[i]); }
+        }
+        if (missing.length === 0) { rErr("Virtual Component values are unavailable; waiting for a complete read."); return; }
+        bVc(values, aVc, missing);
     }, state);
 }
-
-// Add all new virtual components
+// One add at a time. A failed item stays missing and is retried after a fresh inventory on the next cycle.
 function aVc(vCom) {
-    if (cntr < 5 && vCom.length > 0) {
-        let comp = vCom.splice(0, 1)[0];
-        cntr++;
-        Shelly.call("Virtual.Add", { type: comp.type, id: comp.id, config: comp.config },
-            function (res, err, msg) {
-                if (err === 0) {
-                    print(_.pId, "Added new virtual component: " + res.id);
-                } else {
-                    print(_.pId, "Virtual component is not added: " + msg);
-                }
-                cntr--;
-            }
-        );
-    }
-    if (vCom.length > 0) {
-        Timer.set(1000, false, aVc, vCom);
-    } else {
-        wait(sGrp);
-    }
+    if (vCom.length === 0) { sGrp(); return; }
+    const comp = vCom[0];
+    Shelly.call("Virtual.Add", { type: comp.type, id: comp.id, config: comp.config }, function (res, err, msg, data) {
+        if (err !== 0) { rErr("Virtual Component " + data[0].type + ":" + data[0].id + " was not added: " + msg); return; }
+        print(_.pId, "Added virtual component:", res.id);
+        data.splice(0, 1);
+        Timer.set(1000, false, aVc, data);
+    }, vCom);
 }
 
 // Add virtual components to group
@@ -462,11 +479,9 @@ function sGrp() {
 // Read every page of this script's Virtual Components and commit only a complete value set.
 function rVc(state) {
     if (!state || typeof state !== "object" || !state.map) {
-        const recover = state && state.recover === true;
         cntr++;
         state = {
             offset: 0,
-            recover: recover,
             map: [
                 ["tPer", "enum:200", null, false],
                 ["hTim", "number:200", null, false],
@@ -490,7 +505,7 @@ function rVc(state) {
     }, function (res, err, msg, data) {
         if (err !== 0 || !res || !res.components) {
             cntr--;
-            rErr("Virtual Component read failed" + (msg ? ": " + msg : "") + ". Existing schedule was left unchanged.");
+            rErr("Virtual Component read failed" + (msg ? ": " + msg : ""));
             return;
         }
         const comp = res.components;
@@ -520,17 +535,13 @@ function rVc(state) {
         }
         cntr--;
         if (isOk) {
-            print(_.pId, data.recover ? "Virtual Component mode recovered from existing controls." : "Virtual Component mode active");
-            main();
-        } else if (data.recover && found === 0) {
-            print(_.pId, "No existing heating controls found; starting a new Virtual Component installation.");
-            gVc();
+            const values = [];
+            for (let i = 0; i < data.map.length; i++) { values.push(data.map[i][2]); }
+            print(_.pId, "Virtual Component mode active");
+            if (vValid(values)) { bVc(values, main); }
+            else { main(); }
         } else {
-            print(_.pId, data.recover ?
-                "Virtual Component recovery is incomplete or ambiguous. Restore all heating controls, or remove reserved IDs and restart to reinstall. Existing components were left unchanged." :
-                "Virtual Component controls are unavailable or incomplete.");
-            // KVS settings may be absent or stale; keep the active relay configuration until all controls can be read.
-            rErr("Existing schedule and relay settings were left unchanged. Retrying in " + _.freq / 60 + " min.");
+            gVc();
         }
     }, state);
 }
@@ -622,6 +633,23 @@ function gFcs() {
         gEle();
     });
 }
+// Parse exactly one quoted CSV row within its line boundaries.
+function pRow(body, start, end, row) {
+    if (body.slice(start, start + 1) !== '"') { return false; }
+    const epEnd = body.indexOf('"', start + 1);
+    if (epEnd <= start + 1 || epEnd >= end || body.slice(epEnd, epEnd + 3) !== '";"') { return false; }
+    const dtEnd = body.indexOf('"', epEnd + 3);
+    if (dtEnd < 0 || dtEnd >= end || body.slice(dtEnd, dtEnd + 3) !== '";"') { return false; }
+    const priceStart = dtEnd + 3;
+    const priceEnd = body.indexOf('"', priceStart);
+    if (priceEnd <= priceStart || priceEnd !== end - 1) { return false; }
+    const epoch = Number(body.substring(start + 1, epEnd));
+    const price = Number(body.substring(priceStart, priceEnd).replace(",", "."));
+    // Subtracting a finite number from itself is zero; NaN and infinities fail this check.
+    if (epoch - epoch !== 0 || price - price !== 0) { return false; }
+    row[0] = epoch; row[1] = price;
+    return true;
+}
 // Get electricity market price CSV file from Elering
 function gEle() {
     // set the date range for Elering query
@@ -658,51 +686,31 @@ function gEle() {
         res = null;
         let raw = [];
         let eler = [];
-        let aPos = body.indexOf("\n"); //skip the header without copying the response string
+        let pos = body.indexOf("\n") + 1;
         let qCnt = 0;
-        if (aPos >= 0) { aPos++; }
-        while (aPos >= 0 && aPos < body.length) {
-            let row = [0, 0];
-            aPos = body.indexOf("\"", aPos) + 1;
-            if (aPos === 0) {
-                break; // EOF
+        let hour = -1, first = 0, sum = 0, count = 0;
+        let valid = pos > 0;
+        const row = [0, 0]; //reuse one row while scanning the response
+        while (valid && pos < body.length) {
+            let end = body.indexOf("\n", pos);
+            if (end < 0) { end = body.length; }
+            let rowEnd = end;
+            if (body.slice(rowEnd - 1, rowEnd) === "\r") { rowEnd--; }
+            if (!pRow(body, pos, rowEnd, row) || row[0] !== epSt + qCnt * 900) { valid = false; break; }
+            const hr = new Date(row[0] * 1000).getHours();
+            if (hr !== hour) {
+                if (count > 0) { raw.push([first, Math.round(sum / count * 100) / 100 + fFee(first, p)]); }
+                hour = hr; first = row[0]; sum = 0; count = 0;
             }
-            // Epoch
-            row[0] = Number(body.substring(aPos, body.indexOf("\"", aPos)));
-            let pric = 0;
-            let hr = new Date(row[0] * 1000).getHours();
-            let hr15 = hr;
-            let avg = 0;
-            while (hr === hr15 && hr15 < 24)          //sum 1 hour prices
-            {
-                avg++;
-                qCnt++;
-                aPos = body.indexOf(";\"", aPos) + 2; //skip ;
-                aPos = body.indexOf(";\"", aPos) + 2; //find price
-                pric += Number(body.substring(aPos, body.indexOf("\"", aPos)).replace(",", "."));
-
-                aPos = body.indexOf("\n", aPos); //next line
-                if (aPos < 0) {
-                    aPos = body.length;
-                    break; // EOF
-                }
-                let nxt = body.indexOf("\"", aPos) + 1; //next epoch
-                if (nxt === 0) {
-                    aPos = body.length;
-                    break; // EOF
-                }
-                hr15 = new Date(Number(body.substring(nxt, body.indexOf("\"", nxt))) * 1000).getHours(); //next hour
-            }
-
-            row[1] = Math.round((pric / avg) * 100) / 100;  //avg price for the hour, round 2 dec places
-            row[1] += fFee(row[0], p);                      //add transfer fee
-            raw.push(row);
+            sum += row[1]; count++; qCnt++;
+            pos = end + 1;
         }
-        // Check all expected quarters; local days contain 23, 24 or 25 hours around DST changes.
-        if (qCnt !== qExp || raw.length === 0) {
-            hErr("Elering API didn't return prices, check again in " + _.freq / 60 + " min.");
+        body = null;
+        if (!valid || qCnt !== qExp) {
+            hErr("Elering response is incomplete or malformed; retrying in " + _.freq / 60 + " min.");
             return;
         }
+        if (count > 0) { raw.push([first, Math.round(sum / count * 100) / 100 + fFee(first, p)]); }
         //store the timestamp into memory
         _.tsPr = Math.floor(Date.now() / 1000.0);
         print(_.pId, "We got market prices from Elering ", new Date().toString());
@@ -759,7 +767,6 @@ function gEle() {
         }
         p = null;
         raw = null;
-        body = null;
         _.manu = false;
         fTmr(eler); //set the fail-safe timer before replacing the existing schedule
         eler = null;
@@ -841,8 +848,14 @@ function fTmr(eler) {
         }
     }, function (res, err, msg, data) {
         if (err !== 0) {
-            rErr("Relay fail-safe timer is not configured: " + msg + ". Existing schedule was left unchanged.");
-            return;
+            const config = Shelly.getComponentConfig("switch", c.rId);
+            const delay = c.tmr * 60 + 10;
+            if (!config || config.auto_on !== c.Inv || config.auto_off !== !c.Inv ||
+                (c.Inv ? config.auto_on_delay : config.auto_off_delay) !== delay) {
+                rErr("Relay timer update failed and a matching timer could not be verified: " + msg);
+                return;
+            }
+            print(_.pId, "Relay timer update failed, but the existing timer matches; continuing.");
         }
         fdSc(data);
     }, eler);
@@ -871,7 +884,7 @@ function fdSc(eler) {
                         return;
                     }
                 }
-                rErr("Schedule " + old.id + " was not deleted: " + msg + ". Existing schedule was left unchanged. " + listMsg);
+                rErr("Schedule " + old.id + " was not deleted: " + msg + ". " + listMsg);
             }, data);
             return;
         }
@@ -1006,6 +1019,8 @@ function hErr(msg) {
 // Handle local RPC failures without replacing the last known working schedule.
 function rErr(msg) {
     print(_.pId, msg);
+    print(_.pId, s.exSc > 0 ? "Keeping recorded schedule ID " + s.exSc + "." : "No heating schedule is recorded.",
+        "Retrying in " + _.freq / 60 + " min.");
     _.tsPr = 0;
     if (c.isFc) { _.tsFc = 0; }
     _.manu = false;

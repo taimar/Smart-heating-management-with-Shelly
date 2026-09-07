@@ -1500,5 +1500,58 @@ t = boot(true); t.fcTm(); t.flush();
 check("N4 restart between controls and group leaves a cosmetic gap while heating proceeds", controlsBeforeRestart &&
     !t.err && W.schedules.length === 1 && !W.calls.slice(restartCalls).some(groupCall));
 
+// S45. Read configuration, then SystemData, before dispatching either mode.
+for (const outcome of ["KVS", "virtual", "missing configuration", "failed configuration", "both failed"]) {
+    vcWorld(); existingHeating(); W.vcs = installControls();
+    W.kvs.SmartHeatingConf1 = conf({ ManualKVS: outcome !== "virtual" });
+    if (outcome === "missing configuration") delete W.kvs.SmartHeatingConf1;
+    if (outcome.includes("failed")) W.fail["KVS.Get"] = p =>
+        outcome === "both failed" || p.key === "SmartHeatingConf1";
+    const before = JSON.stringify([W.schedules, W.relayConfig, W.vcs, W.kvs]);
+    const logStart = prints.length;
+    t = boot(true); t.fcTm(); t.step();
+    check("S45 " + outcome + ": only configuration is pending initially", !t.err &&
+        JSON.stringify(t.pending()) === JSON.stringify(["KVS.Get"]), t.pending());
+    t.step();
+    check("S45 " + outcome + ": SystemData follows every configuration result", !t.err &&
+        W.calls.length === 1 && W.calls[0].params.key === "SmartHeatingConf1" &&
+        JSON.stringify(t.pending()) === JSON.stringify(["KVS.Get"]), [W.calls, t.pending()]);
+    t.loop();
+    check("S45 " + outcome + ": pending SystemData blocks calculation and overlapping ticks", !t.err &&
+        W.calls.length === 1 && JSON.stringify([W.schedules, W.relayConfig, W.vcs, W.kvs]) === before &&
+        JSON.stringify(t.pending()) === JSON.stringify(["KVS.Get"]));
+    t.step(); t.flush();
+    const paused = prints.slice(logStart).filter(l => l.includes("Schedule updates are paused"));
+    check("S45 " + outcome + ": both reads finish with the original diagnostic priority", !t.err &&
+        W.calls[1]?.params.key === "SmartHeatingSys1" && (outcome.includes("failed")
+            ? JSON.stringify([W.schedules, W.relayConfig, W.vcs, W.kvs]) === before && paused.length === 1 &&
+                paused[0].includes(outcome === "both failed" ? "SystemData could not be loaded" : "Configuration could not be loaded")
+            : paused.length === 0 && W.schedules.length === 1 && W.deleted.includes(41)));
+}
+
+// S46. Persist the create result (or zero) only after schedule work finishes.
+for (const outcome of ["created", "failed", "empty"]) {
+    W = freshWorld(); existingHeating(); W.http = priceServer(PRICE);
+    W.kvs.SmartHeatingConf1 = conf(outcome === "empty" ? { HeatingTime: 0, AlwaysOnPrice: -999 } : {});
+    if (outcome === "failed") W.fail["Schedule.Create"] = true;
+    t = boot(true); t.fcTm();
+    let steps = 0;
+    const pending = outcome === "empty" ? "KVS.set" : "Schedule.Create";
+    while (!t.pending().includes(pending) && !t.err && steps++ < 100) t.step();
+    check("S46 " + outcome + ": no SystemData write before schedule work completes", !t.err &&
+        t.pending().includes(pending) && !W.kvsWrites.includes("SmartHeatingSys1") && W.deleted.includes(41));
+    t.loop(); t.flush();
+    const saved = JSON.parse(W.kvs.SmartHeatingSys1);
+    check("S46 " + outcome + ": saves the resulting ID and version 5 once", !t.err &&
+        saved.ExistingSchedule === (outcome === "created" ? W.schedules[0]?.id : 0) && saved.Version === 5 &&
+        W.schedules.length === (outcome === "created" ? 1 : 0) &&
+        W.kvsWrites.filter(k => k === "SmartHeatingSys1").length === 1);
+    if (outcome === "failed") {
+        delete W.fail["Schedule.Create"]; t.loop(); t.flush();
+        check("S46 failed creation retries on the next tick", !t.err && W.schedules.length === 1 &&
+            JSON.parse(W.kvs.SmartHeatingSys1).ExistingSchedule === W.schedules[0].id);
+    }
+}
+
 console.log(failures === 0 ? "\nALL SPEC CHECKS PASSED" : "\n" + failures + " SPEC FAILURES");
 process.exit(failures === 0 ? 0 : 1);

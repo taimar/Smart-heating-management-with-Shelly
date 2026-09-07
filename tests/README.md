@@ -39,6 +39,7 @@ Existing group names and membership remain untouched, including installation int
 - Invalid settings, conflicting control names, missing values, and failed reads preserve existing settings and heating. Valid controls override inactive KVS heating values only after mode and relay validation.
 - Timer failures require a verified equivalent timer. Incompatible schedules are disabled before a polarity change; local RPC failures retry without guessing state.
 - Failed SystemData writes retain the pending schedule ID, including zero, and retry before another calculation. A deleted key does not erase an ID already known in memory.
+- S45 checks queued configuration → SystemData reads before either mode starts, including missing/failed configuration and SystemData-first pause diagnostics when both reads fail. S46 checks persistence after schedule creation succeeds, fails, or is unnecessary, including version 5 and next-tick retry after creation failure. S23, S25, and S26 retain pending-write and overlapping-tick coverage.
 - Watchdog deletion, concurrent events, cached-ID name checks, and avoidance of unnecessary code writes.
 - SystemData write-failure diagnostics retain the paused-updates sentinel, schedule ID, and RPC reason (S34). A missing Gen2 Pro firmware version selects KVS without attempting virtual controls (S40).
 

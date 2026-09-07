@@ -67,7 +67,6 @@ let c = {
 let s = {
     last: 0,        // KVS:LastCalculation Last calculation timestamp
     exSc: 0,        // KVS:ExistingSchedule Existing heating schedule
-    vers: 0,        // KVS:Version
 }
 
 /*
@@ -114,7 +113,6 @@ let _ = {
     updD: Math.floor(Math.random() * 46),           //delay for server requests (max 45min)
     sId: Shelly.getCurrentScriptId(),               //script ID
     pId: "Id" + Shelly.getCurrentScriptId() + ": ", //print ID
-    scId: '',       //schedule ID
     sysPending: false, //new schedule ID still needs to be saved
     manu: false,    //manual heating flag
     prov: "None",   //network provider name
@@ -126,7 +124,6 @@ let _ = {
     wdOk: false,    //watchdog code verified since boot
     wdId: 0,        //watchdog script ID
 };
-let cntr = 0;    //counter for async functions
 
 function dtVc() {
     return [
@@ -273,13 +270,11 @@ function modeErr(dt) {
 function cErr(dt) {
     const modeProblem = modeErr(dt);
     if (modeProblem) { return modeProblem; }
-    const problem = vErr([
+    return vErr([
         typeof dt.TimePeriod === "number" ? "" + dt.TimePeriod : dt.TimePeriod,
         dt.HeatingTime, dt.IsForecastUsed, dt.EnergyProvider, dt.AlwaysOnPrice,
         dt.AlwaysOffPrice, dt.InvertedRelay, dt.Country, dt.HeatingCurve
     ], true);
-    if (problem) { return problem; }
-    return "";
 }
 // Get KVS ConfigurationData into memory
 function memC(dt) {
@@ -294,37 +289,30 @@ function memC(dt) {
     c.cnty = dt.Country;
     c.hCur = dt.HeatingCurve;
     c.mnKv = typeof dt.ManualKVS === "boolean" ? dt.ManualKVS : c.mnKv;
-    return c;
 }
 // ConfigurationData data to KVS store
 function kvsC() {
-    let cdat = {};
-    cdat.TimePeriod = c.tPer;
-    cdat.HeatingTime = c.hTim;
-    cdat.IsForecastUsed = c.isFc;
-    cdat.EnergyProvider = c.pack;
-    cdat.AlwaysOnPrice = c.lowR;
-    cdat.AlwaysOffPrice = c.higR;
-    cdat.InvertedRelay = c.Inv;
-    cdat.RelayId = c.rId;
-    cdat.Country = c.cnty;
-    cdat.HeatingCurve = c.hCur;
-    cdat.ManualKVS = c.mnKv;
-    return cdat;
-}
-// Get KVS SystemData into memory
-function memS(dt) {
-    s.exSc = dt.ExistingSchedule;
-    s.vers = dt.Version;
-    return s;
+    return {
+        TimePeriod: c.tPer,
+        HeatingTime: c.hTim,
+        IsForecastUsed: c.isFc,
+        EnergyProvider: c.pack,
+        AlwaysOnPrice: c.lowR,
+        AlwaysOffPrice: c.higR,
+        InvertedRelay: c.Inv,
+        RelayId: c.rId,
+        Country: c.cnty,
+        HeatingCurve: c.hCur,
+        ManualKVS: c.mnKv
+    };
 }
 // SystemData data to KVS store
 function kvsS() {
-    let sdat = {};
-    sdat.LastCalculation = s.last;
-    sdat.ExistingSchedule = s.exSc;
-    sdat.Version = s.vers;
-    return sdat;
+    return {
+        LastCalculation: s.last,
+        ExistingSchedule: s.exSc,
+        Version: _.newV
+    };
 }
 // Get KVS ConfigurationData and SystemData
 function gKvs() {
@@ -332,56 +320,58 @@ function gKvs() {
     _.sdOk = false;
     _.installAttempted = false;
     _.cdMissing = false;
-    cntr = 2;
-    Shelly.call('KVS.Get', { key: "SmartHeatingConf" + _.sId },
-        function (res, err, msg) {
-            cntr--;
-            if (err === -105) { // NOT FOUND: first-time initialization is allowed
-                _.cdMissing = true;
-                _.cdOk = true;
-                return;
-            }
-            if (err !== 0 || !res) {
-                print(_.pId, "Configuration read failed:", msg);
-                return;
-            }
-            let saved;
-            try { saved = JSON.parse(res.value); }
-            catch (e) { print(_.pId, "Saved configuration is not valid JSON."); return; }
-            // Validate mode and relay before reading any live controls.
-            const modeProblem = modeErr(saved);
-            if (modeProblem) { print(_.pId, "Correct saved configuration:", modeProblem); return; }
-            const priorMode = c.mnKv;
-            if (saved.ManualKVS !== undefined) { c.mnKv = saved.ManualKVS; }
-            if (isVC()) {
-                c.rId = saved.RelayId;
-            } else {
-                const problem = cErr(saved);
-                if (problem) {
-                    c.mnKv = priorMode;
-                    print(_.pId, "Invalid saved configuration; correct this setting:", problem); return;
-                }
-                c = memC(saved);
-            }
-            _.cdOk = true;
+    Shelly.call('KVS.Get', { key: "SmartHeatingConf" + _.sId }, function (res, err, msg) {
+        rConf(res, err, msg);
+        Shelly.call('KVS.Get', { key: "SmartHeatingSys" + _.sId }, function (res, err, msg) {
+            rSys(res, err, msg);
+            inst();
         });
+    });
+}
 
-    Shelly.call('KVS.Get', { key: "SmartHeatingSys" + _.sId },
-        function (res, err, msg) {
-            cntr--;
-            // A deleted key does not erase the schedule ID already known this boot.
-            if (err === -105) { _.sdOk = true; return; }
-            if (err !== 0 || !res) { print(_.pId, "SystemData read failed:", err, msg); return; }
-            try {
-                const saved = JSON.parse(res.value);
-                if (!saved || !idOk(saved.ExistingSchedule)) {
-                    print(_.pId, "Invalid SystemData: ExistingSchedule must be a non-negative integer."); return;
-                }
-                s = memS(saved);
-                _.sdOk = true;
-            } catch (e) { print(_.pId, "SystemData is not valid JSON; restore the record with the correct schedule ID."); }
-        });
-    wait(inst);
+function rConf(res, err, msg) {
+    if (err === -105) { // NOT FOUND: first-time initialization is allowed
+        _.cdMissing = true;
+        _.cdOk = true;
+        return;
+    }
+    if (err !== 0 || !res) {
+        print(_.pId, "Configuration read failed:", msg);
+        return;
+    }
+    let saved;
+    try { saved = JSON.parse(res.value); }
+    catch (e) { print(_.pId, "Saved configuration is not valid JSON."); return; }
+    // Validate mode and relay before reading any live controls.
+    const modeProblem = modeErr(saved);
+    if (modeProblem) { print(_.pId, "Correct saved configuration:", modeProblem); return; }
+    const priorMode = c.mnKv;
+    if (saved.ManualKVS !== undefined) { c.mnKv = saved.ManualKVS; }
+    if (isVC()) {
+        c.rId = saved.RelayId;
+    } else {
+        const problem = cErr(saved);
+        if (problem) {
+            c.mnKv = priorMode;
+            print(_.pId, "Invalid saved configuration; correct this setting:", problem); return;
+        }
+        memC(saved);
+    }
+    _.cdOk = true;
+}
+
+function rSys(res, err, msg) {
+    // A deleted key does not erase the schedule ID already known this boot.
+    if (err === -105) { _.sdOk = true; return; }
+    if (err !== 0 || !res) { print(_.pId, "SystemData read failed:", err, msg); return; }
+    try {
+        const saved = JSON.parse(res.value);
+        if (!saved || !idOk(saved.ExistingSchedule)) {
+            print(_.pId, "Invalid SystemData: ExistingSchedule must be a non-negative integer."); return;
+        }
+        s.exSc = saved.ExistingSchedule;
+        _.sdOk = true;
+    } catch (e) { print(_.pId, "SystemData is not valid JSON; restore the record with the correct schedule ID."); }
 }
 
 // Select running mode like KVS or Virtual components
@@ -475,7 +465,6 @@ function sGrp() {
 // Read every page of this script's Virtual Components and commit only a complete value set.
 function rVc(state) {
     if (!state || typeof state !== "object" || !state.map) {
-        cntr++;
         state = {
             offset: 0,
             groupPresent: false,
@@ -502,7 +491,6 @@ function rVc(state) {
         offset: state.offset
     }, function (res, err, msg, data) {
         if (err !== 0 || !res || !res.components) {
-            cntr--;
             rErr("Virtual Component read failed" + (msg ? ": " + msg : ""));
             return;
         }
@@ -515,12 +503,10 @@ function rVc(state) {
             for (let j = 0; j < comp.length; j++) {
                 if (data.map[i][1] === comp[j].key) {
                     if (!comp[j].config || comp[j].config.name !== data.map[i][4]) {
-                        cntr--;
                         rErr("Virtual Component " + comp[j].key + " has missing configuration or a conflicting name; expected '" + data.map[i][4] + "'.");
                         return;
                     }
                     if (!comp[j].status || comp[j].status.value === undefined) {
-                        cntr--;
                         rErr("Virtual Component " + comp[j].key + " (" + data.map[i][4] + ") has no usable value. " +
                             "If the control exists, wait for the next read; restore it manually only if it is actually missing.");
                         return;
@@ -533,7 +519,6 @@ function rVc(state) {
         }
         const next = (typeof res.offset === "number" ? res.offset : data.offset) + comp.length;
         if (typeof res.total !== "number" || (next < res.total && comp.length === 0)) {
-            cntr--;
             rErr("Virtual Component inventory is incomplete; installation and schedule updates postponed."); return;
         }
         if (next < res.total) {
@@ -546,7 +531,6 @@ function rVc(state) {
             if (data.map[i][3]) { found++; }
         }
         const isOk = found === data.map.length;
-        cntr--;
         if (isOk) {
             const values = [];
             for (let i = 0; i < data.map.length; i++) { values.push(data.map[i][2]); }
@@ -949,11 +933,9 @@ function fdSc(eler) {
 
 // Create a new schedule with the advanced timespec to cover all the hours within the same schedule item
 function fScd(eler) {
-    cntr = 1;
-    _.scId = 0;
     if (eler === undefined || eler.length == 0) {
         print(_.pId, "No heating calculated for any hours with the current configuration.")
-        fKvs();
+        fKvs(0);
         return;
     }
     // Sort the heating by hour
@@ -985,28 +967,22 @@ function fScd(eler) {
             _.tsPr = 0;
             if (c.isFc) { _.tsFc = 0; }
             _.manu = false;
-        } else {
-            _.scId = res.id; //last scheduleID to store in KVS
         }
-        cntr--;
+        fKvs(err === 0 ? res.id : 0);
     });
     print(_.pId, "Heating will be turned on to following hours 'HH:mm (EUR/MWh Energy Price + Transmission)':\n", pric);
-    wait(fKvs);
 }
 
 // Keep the new ID in memory until it is saved; later cycles retry this write before reading stale KVS.
-function fKvs() {
+function fKvs(id) {
     s.last = new Date().toString();
-    s.exSc = _.scId;
-    s.vers = _.newV;
+    s.exSc = id;
     _.sysPending = true;
     pSys();
 }
 function pSys() {
-    cntr = 1;
     Shelly.call("KVS.set", { key: "SmartHeatingSys" + _.sId, value: JSON.stringify(kvsS()) },
         function (res, err, msg) {
-            cntr--;
             if (err !== 0) {
                 print(_.pId, "Schedule updates are paused. Schedule ID", s.exSc, "could not be saved:", msg,
                     "Retrying the same record in", _.freq / 60, "min.");
@@ -1096,19 +1072,6 @@ function rErr(msg) {
     _.manu = false;
     _.isLp = false;
 }
-// Wait for the RPC calls to be completed before starting next function.
-function wait(data) {
-    if (cntr !== 0) {
-        Timer.set(1000, false, wait, data);
-        return;
-    }
-    if (typeof data === "function") {   //if data is a function, call it
-        data();
-    } else {                            //if data is an array, the first element is a function and the second element is a parameter
-        data[0](data[1]);
-    }
-}
-
 // Next hour for heating calculation
 function nxHr(adHr) {
     const chkT = c.isFc && c.tPer > 0 ? c.tPer : 24;

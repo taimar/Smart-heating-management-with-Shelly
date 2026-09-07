@@ -12,8 +12,7 @@
 > * Põhjus: Vanemad skriptid eeldavad tunnipõhiseid hindu, kuid nüüd tagastab API 15-minutilisi intervalle.
 
 > [!IMPORTANT]
-> Alates 1. oktoobrist 2025 kasutab Elering 15-min elektrihinda, mis tähendab neli korda rohkem andmeid. See suurendab oluliselt mälukasutust (kuni 22kB), mistõttu saavad Shelly seadmed nüüd käivitada ainult ühe skripti seadme kohta. Palun veendu, et nüüdsest on iga skripti jaoks eraldi Shelly seade.
-> Seda ei ole veel Gen-4 seadmetega testitud — need võivad toetada suuremat skriptimälu.
+> Veerandtunni hindade vastuses on neli korda rohkem ridu kui tunnihindade vastuses. Selle versiooni maksimaalset mälukasutust ei ole Shelly seadmel mõõdetud. Enne mitme skripti kasutamist kontrolli oma seadmel `mem_used` ja `mem_peak` väärtusi; varukoopia JSON-i pikkus ei näita RAM-i kasutust.
 
 
 - [Nutikas ja odav börsihinna järgi kütmine Shellyga](#nutikas-ja-odav-börsihinna-järgi-kütmine-shellyga)
@@ -108,11 +107,11 @@ let c = {
     tPer: 24,       // KVS:TimePeriod VC:Heating Period (h) 24/12/6/0
     hTim: 10,       // KVS:HeatingTime VC:Heating Time (h/period)
     isFc: false,    // KVS:IsForecastUsed VC:Forecast Heat
-    pack: "VORK2",  // KVS:EnergyProvider VC:Network Package (NONE, VORK1, VORK2, VORK4, VORK5, PARTN24, PARTN24PL, PARTN12, PARTN12PL)
+    pack: "VORK2",  // KVS:EnergyProvider VC:Network Package (NONE, VORK1, VORK2, VORK4, VORK5, PARTN24, PARTN24PL, PARTN12, PARTN12PL, PAMATA1, SPECIAL1)
     lowR: 1,        // KVS:AlwaysOnPrice VC:Heat On (min price) (EUR/MWh)
     higR: 300,      // KVS:AlwaysOffPrice VC:Heat Off (max price) (EUR/MWh)
     Inv: false,     // KVS:InvertedRelay VC:Inverted Relay
-    rId: 0,         // KVS:RelayId VC: N/A, always first relay (0)
+    rId: 0,         // KVS:RelayId selects the relay in both modes; required in saved configuration
     cnty: "ee",     // KVS:Country VC:Market Price Country (ee, fi, lv, lt)
     hCur: 0,        // KVS:HeatingCurve VC:Heating Curve 
     tmr: 60,        // Default timer
@@ -169,9 +168,11 @@ Elektrilevi või Imatra elektri ülekandetasude pakett. Valikus on VORK1, VORK2,
 | ``VORK4`` | **Elektrilevi**<br> Päeval 37 EUR/MWh <br> Öösel 21 EUR/MWh | <img src="images/Vork2-4.jpg" alt="Elektrilevi Võrk 2, 4" width="250"> |
 | ``VORK5`` | **Elektrilevi**<br> Päeval 53 EUR/MWh <br> Öösel 30 EUR/MWh <br> Päeva tipp 82 EUR/MWh <br> Puhke tipp 47 EUR/MWh | <img src="images/Vork5-1.jpg" alt="Elektrilevi Võrk 5" width="250"> <img src="images/Vork5-2.jpg" alt="Elektrilevi Võrk 5" width="250"> |
 | ``PARTN24`` | **Imatra**<br> Päev/öö 60 EUR/MWh | |
-| ``PARTN24P`` | **Imatra**<br> Päev/öö 39 EUR/MWh | |
+| ``PARTN24PL`` | **Imatra**<br> Päev/öö 39 EUR/MWh | |
 | ``PARTN12`` | **Imatra**<br> Päeval 72 EUR/MWh <br> Öösel 42 EUR/MWh | Suveaeg päev: E-R kell 8:00–24:00.<br>Öö: E-R kell 0:00–08:00, L-P terve päev <br> Talveaeg päev: E-R kell 7:00–23:00.<br>Öö: E-R kell 23:00–7:00, L-P terve päev |
-| ``PARTN12P`` | **Imatra**<br> Päeval 46 EUR/MWh <br> Öösel 27 EUR/MWh | Suveaeg päev: E-R kell 8:00–24:00.<br>Öö: E-R kell 0:00–08:00, L-P terve päev <br> Talveaeg päev: E-R kell 7:00–23:00.<br>Öö: E-R kell 23:00–7:00, L-P terve päev |
+| ``PARTN12PL`` | **Imatra**<br> Päeval 46 EUR/MWh <br> Öösel 27 EUR/MWh | Suveaeg päev: E-R kell 8:00–24:00.<br>Öö: E-R kell 0:00–08:00, L-P terve päev <br> Talveaeg päev: E-R kell 7:00–23:00.<br>Öö: E-R kell 23:00–7:00, L-P terve päev |
+| ``PAMATA1`` | Läti, Pamata-1; skripti seadistatud võrgutasu 39.62 EUR/MWh | Kõik tunnid |
+| ``SPECIAL1`` | Läti, Speciālais 1; skripti seadistatud võrgutasu 158.48 EUR/MWh | Kõik tunnid |
 | ``NONE`` | Võrgutasu on 0 ||
 
 #### ``"AlwaysOnPrice": 10``
@@ -237,11 +238,11 @@ let c = {
     tPer: 24,       // KVS:TimePeriod VC:Heating Period (h) 24/12/6/0
     hTim: 10,       // KVS:HeatingTime VC:Heating Time (h/period)
     isFc: false,    // KVS:IsForecastUsed VC:Forecast Heat
-    pack: "VORK2",  // KVS:EnergyProvider VC:Network Package (NONE, VORK1, VORK2, VORK4, VORK5, PARTN24, PARTN24PL, PARTN12, PARTN12PL)
+    pack: "VORK2",  // KVS:EnergyProvider VC:Network Package (NONE, VORK1, VORK2, VORK4, VORK5, PARTN24, PARTN24PL, PARTN12, PARTN12PL, PAMATA1, SPECIAL1)
     lowR: 1,        // KVS:AlwaysOnPrice VC:Heat On (min price) (EUR/MWh)
     higR: 300,      // KVS:AlwaysOffPrice VC:Heat Off (max price) (EUR/MWh)
     Inv: false,     // KVS:InvertedRelay VC:Inverted Relay
-    rId: 0,         // KVS:RelayId VC: N/A, always first relay (0)
+    rId: 0,         // KVS:RelayId selects the relay in both modes; required in saved configuration
     cnty: "ee",     // KVS:Country VC:Market Price Country (ee, fi, lv, lt)
     hCur: 0,        // KVS:HeatingCurve VC:Heating Curve 
     tmr: 60,        // Default timer
@@ -251,6 +252,18 @@ let c = {
 ```
 
 ## Skripti uuendamine
+
+Enne uuendamist kontrolli aktiivseid seadeid. `TimePeriod` toetatud väärtused on **0, 6, 12 ja 24**. Vanemates versioonides töötanud muu väärtus, näiteks 8, peatab ajakava uuendamise kuni kasutaja valib toetatud perioodi. Skript ei teisenda seda automaatselt. `HeatingTime` on miinimum iga perioodi kohta; perioodi muutmisel vaata üle ka see väärtus.
+
+KVS-režiimis sisesta arvud JSON-arvudena (`"HeatingTime": 10`, mitte `"HeatingTime": "10"`), tõeväärtused kujul `true` või `false` ning määra `Country` (`ee`, `fi`, `lv` või `lt`). Õiged paketinimed on `PARTN24PL` ja `PARTN12PL`; varasema juhendi lühemad kirjapildid olid vead. Vigased seaded jäetakse parandamiseks alles. Virtuaalkomponentide režiimis tulevad üheksa kütteseadet komponentidest, kuid salvestatud `ManualKVS` ja `RelayId` peavad olema loetavad ja korrektsed. Iga salvestatud konfiguratsioon peab sisaldama mittenegatiivset täisarvu `RelayId`, mis valib relee nii KVS- kui ka virtuaalkomponentide režiimis. Virtuaalkomponentide režiimi jaoks piisab kirjest `{ "ManualKVS": false, "RelayId": 0 }`. Ainult `ManualKVS` välja sisaldav kirje lükatakse tagasi; puuduvat relee ID-d ei asendata automaatselt nulliga. Uuel paigaldusel, kus konfiguratsioonivõtit veel pole, kasutatakse skripti algset `rId` väärtust (vaikimisi 0).
+
+Logiteade **„Schedule updates are paused”** tähendab, et ajakava ei uuendata hindade järgi. Varasem ajakava võib vanu tunde korrata; uuel paigaldusel võib ajakava puududa. Paranda teates nimetatud seade või komponent. Skript proovib uuesti iga viie minuti järel.
+
+Esimese täieliku ja korrektse komponendilugemise järel salvestatakse väike varukoopia puuduvate juhtkomponentide taastamiseks. Ilma varukoopiata nimetab skript puuduvad komponendid ega asenda neid oletatud vaikeväärtustega. Loetamatu või vigane `SmartHeatingVC<ScriptId>` kirje peatab paigalduse ja taastamise, kui selle käivituse jooksul pole varukoopiat juba kontrollitud. Kontrollitud varukoopia mälus olevad väärtused võivad taastada puuduvad juhtkomponendid; olemasolevad juhtkomponendid säilitavad oma praegused väärtused. Ühendatud väärtused kontrollitakse ja salvestatakse enne puuduvate juhtkomponentide lisamist. Seadeid ei asendata vaikeväärtustega. Vaikeväärtustega paigaldamine ja komponentide kustutamise soovitus on lubatud ainult siis, kui varukoopia võtme puudumine on kinnitatud. Täielik ja korrektne juhtkomponentide komplekt saab endiselt anda seaded ning uuendada varukoopiat. Ajutise lugemistõrke korral väldib samade väärtustega mälus olev varukoopia uut välkmällu kirjutamist; kinnitatult puuduv või vigane kirje taastatakse korrektsete juhtkomponentide väärtustest. Kui varukoopia on vigane, juhtkomponente on puudu ja mälus pole kontrollitud varukoopiat, taasta korrektne varukoopia JSON või kõik üheksa korrektset juhtkomponenti. Kui kõik reserveeritud juhtkomponendid on juba eemaldatud ning soovid teadlikult vaikeväärtusi, kustuta vigane `SmartHeatingVC<ScriptId>` võti ja taaskäivita skript. Taastamisel säilivad olemasoleva grupi nimi ja liikmed. Logiteade tuletab meelde, et vajaduse korral tuleb taastatud juhtkomponendid gruppi käsitsi lisada. Grupp luuakse juhtkomponentide paigaldamise või taastamise käigus, kui kõik üheksa juhtkomponenti on kontrollitud. Ainult grupi kustutamine ei põhjusta selle uuesti loomist, ka pärast taaskäivitust, kui kõik üheksa juhtkomponenti on alles. Loomist või liikmete määramist proovitakse uuesti ainult siis, kui kütte ajakava arvutamine on niigi vajalik; ootel grupitoiming ei käivita eraldi arvutust. Pärast kolme korduskatset lubavat tõrget skripti ühe käivituse jooksul lõpetatakse katsed ning logitakse käsitsi grupeerimise juhis. Grupi loomise ja liikmete määramise tõrgetel on ühine loendur. Loendur suureneb ainult siis, kui tõrke järel jääb toiming uue katse ootele. Edukad toimingud ning hõivatud või kustutatud grupi tõttu lõpetatud katsed loendurit ei suurenda. Taaskäivitus nullib loenduri ning hilisem puuduvate juhtkomponentide taastamine võib lubada uut grupi loomise katset. Kütte ajakava uuendamine jätkub grupi õnnestumisest sõltumatult. Hõivatud grupi ID lõpetab loomise korduskatsed. Kui uus grupp kustutatakse enne liikmete määramist, lõpetatakse korduskatsed ja gruppi ei looda uuesti. Olemasolevad grupid jäetakse puutumata. Kui taaskäivitus katkestab grupi seadistamise, võib olla vaja grupp käsitsi luua või selle liikmed määrata: pärast taaskäivitust ei oletata olemasoleva tühja grupi omanikku. Täiendavat püsimällu salvestatavat märgist ei kasutata.
+
+SystemData lugemise tõrge peatab arvutuse; loetamatut kirjet ei käsitleta puuduva ajakavana. Kirjutamise tõrke korral proovitakse sama kirjet enne uut arvutust uuesti salvestada. Taaskäivitus või voolukatkestus enne salvestamist võib endiselt jätta ajakava ID salvestamata. Pärast skripti käivitamist logitakse esimesest edukalt loetud ajakavade loendist teised sama releed juhtivad ajakavad ning jäetakse need puutumata. Ka tühi loend lõpetab selle diagnostika; hiljem lisatud ajakavasid ei jälgita. Logiteade ei tõesta omanikku ega taasta salvestamata ID-d.
+
+Hinnavastus peab sisaldama kohaliku päeva kõiki 92, 96 või 100 veerandtundi. Vanu tunnihindade vastuseid ei toetata. Sügisesel kellakeeramisel kasutatakse korduva tunni esimese esinemise hinda, sest [Shelly ajakava käivitub ainult sellel esimesel korral](https://shelly-api-docs.shelly.cloud/gen2/ComponentsAndServices/Schedule/). Ka teise esinemise kõik veerandtunnid kontrollitakse üle. Kevadisel kellakeeramisel on ajastatavaid tunde 23.
 
 
 > [!WARNING] 
@@ -318,11 +331,12 @@ flowchart TD
 * See skript sõltub internetist ja kahest teenusest:
     * Elektrituru hind [Eleringi API](https://dashboard.elering.ee/assets/api-doc.html#/nps-controller/getPriceUsingGET),
     * Ilmaprognoos [Open-Meteo API](https://open-meteo.com/en/docs).
-* <p>Shelly Gen2 Plus seadmete püsivara peab olema versioon 1.4.4 või uuem. KVS andmed on kirjutuskaitstud, kui püsivara versioon on 1.4.3 või vanem.
-* <p>Shelly Gen2 Pro või Gen3 seadmete püsivara peab olema versioon 1.4.4 või uuem. Skript ei installi virtuaalseid komponente, kui püsivara versioon on 1.4.3 või vanem.
+* Selle paigaldusjuhendi kasutamisel vali püsivara 1.4.4 või uuem. Skripti senine võimekuse kontroll lubab virtuaalkomponente Gen2 Pro seadmetel alates versioonist 1.4.3 ning Gen3/Gen4 seadmetel põlvkonna järgi; see ei ole täielik püsivara ühilduvuse test.
 
 ## Testitud rikkestsenaariumid
-Alltoodud rikete ajal kasutab Shelly ``Heating Time`` kestust, et lülitada küte ajalooliselt odavamate tundide järgi sisse.  
+
+Kui `TimePeriod: 0` korral puuduvad hinnad, peatatakse ajakava uuendamine ning säilivad olemasolev ajakava ja relee seadistus. Ainult hinnapiiridel põhineval režiimil ei ole ajalooliste odavate tundide varuajakava. Korrektsete hindade saabumisel jätkub hinnapõhine ajastamine. Ajaperioodiga režiimi varuajakava eemaldab nullile seatud kütteaja korral endiselt kütte ajakava.
+Ajaperioodiga režiimides kasutab Shelly alltoodud rikete ajal ``Heating Time`` kestust, et lülitada küte ajalooliselt odavamate tundide järgi sisse.
 Internetirikke korral jagab Shelly oma küttetunnid vastavalt häälestatud perioodide vahel.
 
 **Testitud rikkestsenaariumid**

@@ -11,8 +11,7 @@
 > * Reason: Older scripts assume hourly prices, but now the API returns 15-minute intervals.
 
 > [!IMPORTANT]
-> Starting October 1, 2025, the Elering API now provides electricity market prices in 15-min intervals, resulting in four times more data. This significantly increases memory usage (peak usage 22kB), so Shelly devices can now run only one instance of this script per device. Please ensure that you dedicate a separate Shelly device for each script.
-> This has not yet been validated with Gen-4 devices, which may support increased memory for scripting.
+> Quarter-hour prices contain four times as many rows as hourly prices. Peak memory for this version has not been measured on a Shelly device. Check `mem_used` and `mem_peak` on your device before relying on multiple instances; serialized backup size is not a RAM measurement.
 
 
 - [Smart and cheap heating with Shelly](#smart-and-cheap-heating-with-shelly)
@@ -116,11 +115,11 @@ let c = {
     tPer: 24,       // KVS:TimePeriod VC:Heating Period (h) 24/12/6/0
     hTim: 10,       // KVS:HeatingTime VC:Heating Time (h/period)
     isFc: false,    // KVS:IsForecastUsed VC:Forecast Heat
-    pack: "VORK2",  // KVS:EnergyProvider VC:Network Package (NONE, VORK1, VORK2, VORK4, VORK5, PARTN24, PARTN24PL, PARTN12, PARTN12PL)
+    pack: "VORK2",  // KVS:EnergyProvider VC:Network Package (NONE, VORK1, VORK2, VORK4, VORK5, PARTN24, PARTN24PL, PARTN12, PARTN12PL, PAMATA1, SPECIAL1)
     lowR: 1,        // KVS:AlwaysOnPrice VC:Heat On (min price) (EUR/MWh)
     higR: 300,      // KVS:AlwaysOffPrice VC:Heat Off (max price) (EUR/MWh)
     Inv: false,     // KVS:InvertedRelay VC:Inverted Relay
-    rId: 0,         // KVS:RelayId VC: N/A, always first relay (0)
+    rId: 0,         // KVS:RelayId selects the relay in both modes; required in saved configuration
     cnty: "ee",     // KVS:Country VC:Market Price Country (ee, fi, lv, lt)
     hCur: 0,        // KVS:HeatingCurve VC:Heating Curve 
     tmr: 60,        // Default timer
@@ -179,6 +178,8 @@ Please check the details in this [Elektrilevi page](https://elektrilevi.ee/en/vo
 |``PARTN24PL``|Imatra<br> Day and night basic rate 39 EUR/MWh|  |
 |``PARTN12``|Imatra<br> Day 72 EUR/MWh <br> Night 42 EUR/MWh| Summer Daytime: MO-FR at 8:00–24:00.<br>Summer Night time: MO-FR at 0:00–08:00, SA-SU all day <br> Winter Daytime: MO-FR at 7:00–23:00.<br>Winter Night time: MO-FR at 23:00–7:00, SA-SU all day |
 |``PARTN12PL``|Imatra<br> Day 46 EUR/MWh <br> Night 27 EUR/MWh|Summer Daytime: MO-FR at 8:00–24:00.<br>Summer Night time: MO-FR at 0:00–08:00, SA-SU all day <br> Winter Daytime: MO-FR at 7:00–23:00.<br>Winter Night time: MO-FR at 23:00–7:00, SA-SU all day|
+|``PAMATA1``|Latvia, Pamata-1; configured transfer rate 39.62 EUR/MWh|All hours|
+|``SPECIAL1``|Latvia, Speciālais 1; configured transfer rate 158.48 EUR/MWh|All hours|
 |``NONE``|Network fee is set to 0 and it will not taken into account.||
 
 #### ``"AlwaysOnPrice": 10``
@@ -231,7 +232,7 @@ Check heating curve impact for [heating time dependency graphs](https://github.c
 ## How to run two instances of this script
 
 If Virtual Components are supported, then the first instance in installed using Virtual Components. All the configuration is done through the Virtual Components.  
-The second instance of this script can run only in KVS-mode in the same device.
+The second instance must be explicitly forced into KVS mode on the same device, as described below.
 
 ### How to force script to KVS mode
 
@@ -246,11 +247,11 @@ let c = {
     tPer: 24,       // KVS:TimePeriod VC:Heating Period (h) 24/12/6/0
     hTim: 10,       // KVS:HeatingTime VC:Heating Time (h/period)
     isFc: false,    // KVS:IsForecastUsed VC:Forecast Heat
-    pack: "VORK2",  // KVS:EnergyProvider VC:Network Package (NONE, VORK1, VORK2, VORK4, VORK5, PARTN24, PARTN24PL, PARTN12, PARTN12PL)
+    pack: "VORK2",  // KVS:EnergyProvider VC:Network Package (NONE, VORK1, VORK2, VORK4, VORK5, PARTN24, PARTN24PL, PARTN12, PARTN12PL, PAMATA1, SPECIAL1)
     lowR: 1,        // KVS:AlwaysOnPrice VC:Heat On (min price) (EUR/MWh)
     higR: 300,      // KVS:AlwaysOffPrice VC:Heat Off (max price) (EUR/MWh)
     Inv: false,     // KVS:InvertedRelay VC:Inverted Relay
-    rId: 0,         // KVS:RelayId VC: N/A, always first relay (0)
+    rId: 0,         // KVS:RelayId selects the relay in both modes; required in saved configuration
     cnty: "ee",     // KVS:Country VC:Market Price Country (ee, fi, lv, lt)
     hCur: 0,        // KVS:HeatingCurve VC:Heating Curve 
     tmr: 60,        // Default timer
@@ -260,6 +261,18 @@ let c = {
 ```
 
 ## Updating Script
+
+Before upgrading, check the active settings. Supported `TimePeriod` values are **0, 6, 12 and 24**. Earlier versions could use other values, such as 8; this version pauses schedule updates until you choose a supported value. It does not convert 8 to another period. `HeatingTime` is the minimum per period, so review it when changing the period.
+
+In KVS mode, enter numeric settings as JSON numbers (for example, `"HeatingTime": 10`, not `"HeatingTime": "10"`), booleans as `true` or `false`, and supply `Country` (`ee`, `fi`, `lv` or `lt`). The package names are `PARTN24PL` and `PARTN12PL`; the shorter spellings in older Estonian instructions were errors. Invalid values are logged and retained for you to correct. In Virtual Component mode, the nine heating values come from the controls; saved `ManualKVS` and `RelayId` must still be readable and valid. Every saved configuration must include `RelayId` as a non-negative integer; it selects the relay in both KVS and Virtual Component modes. For VC mode, `{ "ManualKVS": false, "RelayId": 0 }` is sufficient. A record containing only `ManualKVS` is rejected; an omitted relay is not silently defaulted to zero. A fresh installation with no configuration key uses the script’s initial `rId` value (0 by default).
+
+The log message **“Schedule updates are paused”** means prices are no longer updating the schedule. A previous schedule may continue repeating its old hours; on a fresh install there may be no schedule. Correct the reported setting or control and the next five-minute retry resumes updates.
+
+After the first complete valid control read, the script saves a compact backup for missing-control repair. Without that backup it will name the missing controls and refuse to guess their values. An unreadable or invalid `SmartHeatingVC<ScriptId>` record pauses initialization and repair unless a backup was already validated during this script run. A validated cache can restore missing controls; surviving controls keep their live values. The script validates and saves the merged values before adding missing controls, without replacing settings with defaults. Only a confirmed missing-key response permits default initialization or advice to delete controls for a fresh installation. Complete valid live controls can still supply settings and refresh the backup. A matching cached backup avoids another flash write after a transient read failure; confirmed missing or corrupt records are refreshed from the valid live controls. For a corrupt backup with incomplete controls and no validated cache, restore valid backup JSON or all nine valid controls. If all reserved controls are already absent and you intentionally want defaults, delete the corrupt `SmartHeatingVC<ScriptId>` key and restart. Existing group names and membership are preserved during repair; a log note reminds you to add restored controls to your group manually if needed. The group is created during installation or repair of the controls, after all nine controls are valid. Removing only the group does not recreate it, including after restart when all nine controls remain present. Failed creation or population retries only during heating calculations that are already required; pending group work never triggers a calculation on an idle tick. After three retryable failures across creation and population in one script run, retries stop with a manual-grouping message. Successful calls and terminal occupied/deleted outcomes do not consume this budget. The budget resets at script restart; a subsequent repair of missing controls may try group creation again. Heating updates continue independently of group success. An occupied group ID ends creation retries; deleting the new group before population ends population retries without recreating it. Existing groups remain untouched. If a restart interrupts group setup, you may need to create or populate the group manually: the script deliberately does not infer ownership of an existing empty group after restart. No extra persistent marker is stored.
+
+A failed SystemData read pauses calculation without treating an unreadable record as an empty one. A failed write retries the same record before another calculation. A restart or power cut before that write succeeds can still leave an unrecorded schedule. After boot, the first successful schedule-list read reports any other jobs controlling the same relay and leaves them unchanged. An empty list also completes this diagnostic; jobs added later are not tracked. This diagnostic does not establish ownership or recover orphan schedules.
+
+The price feed must contain all 92, 96 or 100 quarter-hour rows for the local day. Historical hourly responses are not supported. At the autumn clock change, the repeated hour uses its first occurrence's price because [Shelly cron runs it only once, at that first occurrence](https://shelly-api-docs.shelly.cloud/gen2/ComponentsAndServices/Schedule/). All quarters of the second occurrence are still validated. The spring day has 23 schedulable hours.
 
 > [!WARNING] 
 > Direct upgrade from script version 4.1 to a newer version is not supported due to a change in KVS data format to JSON.  
@@ -320,7 +333,7 @@ flowchart TD
 ## Important To Know
 
 * <p>When the script is stopped, the schedule is deleted. Shelly only follows the heating algorithm when the script is running.</p>
-* <p>Two script instances can run in parallel, however, if the first is in Virtual Components mode, then the second instance can run only in KVS-mode on the same device.</p>
+* <p>Two script instances can run in parallel, however, if the first is in Virtual Components mode, then the second instance must be explicitly forced into KVS mode on the same device.</p>
 * <p>Up to two instances of this script can run concurrently in KVS mode, both employing different algorithm. These instances can either operate with the same switch output using Shelly Plus 1 or use different switch outputs, as supported by devices like Shelly Plus 2PM.</p>
 * <p>This script creates a special "watchdog" script. This "watchdog" script ensures proper cleanup when the heating script is stopped or deleted.</p>
 * <p>To mitigate the impact of internet outages, this script uses parameter ``heating time`` to turn on heating based on historically cheap hours.</p>
@@ -330,12 +343,13 @@ flowchart TD
 * This script depends on the internet and these two services:
     * Electricity market price from [Elering API](https://dashboard.elering.ee/assets/api-doc.html#/nps-controller/getPriceUsingGET),
     * Weather forecast from [Open-Meteo API](https://open-meteo.com/en/docs).
-* <p>The firmware of Shelly Gen2 Plus devices must be version 1.4.4 or higher. The KVS store is read only if the firmware version is 1.4.3 or older.
-* <p>The firmware of Shelly Gen2 Pro or Gen3 devices must be version 1.4.4 or higher. The script will not install Virtual Components if the firmware version is 1.4.3 or older.
+* Use firmware 1.4.4 or newer for these installation instructions. The script’s existing capability check accepts Virtual Components on Gen2 Pro from 1.4.3, and on Gen3/Gen4 by generation; that check is not a full firmware compatibility test.
 <br>
 
 ## Tested Failure Scenarios
-During any of the failures below, Shelly uses the ``Heating Time`` duration to turn on heating based on historically cheap hours.
+
+With `TimePeriod: 0` (threshold-only mode), unavailable prices pause schedule updates and preserve the existing schedule and relay configuration. No historical-hour fallback is defined for this mode. Valid prices resume threshold-based scheduling; the offline fallback for a timed period with zero requested hours still clears the schedule.
+In timed-period modes, during any of the failures below, Shelly uses the ``Heating Time`` duration to turn on heating based on historically cheap hours.
 
 In error mode, Shelly divides the heating time bsaed on the configured periods.
 

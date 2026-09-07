@@ -98,6 +98,7 @@ const Shelly = {
             case "Shelly.GetComponents": {
                 // models a keys-capable, PAGINATED firmware: filters by p.keys, pages by p.offset
                 let list = W.vcs.slice();
+                if (W.hiddenStatusKey && p.include && p.include.includes("status")) list = list.filter(v => v.key !== W.hiddenStatusKey);
                 if (p.keys && !W.ignoreKeys) list = list.filter(v => p.keys.indexOf(v.key) !== -1);
                 const ps = W.pageSize || 1000;
                 const off = p.offset || 0;
@@ -114,11 +115,25 @@ const Shelly = {
                 W.vcs = W.vcs.filter(v => v.key !== p.key);
                 return done({}, 0);
             }
-            case "Virtual.Add": {
-                W.vcs.push({ key: p.type + ":" + p.id, config: p.config, status: { value: p.config.default_value } });
-                return done({ id: p.id }, 0);
+            case "Group.GetConfig": {
+                const group = W.vcs.find(v => v.key === "group:" + p.id);
+                return group ? done(group.config, 0) : done(null, -105, "Bad id=" + p.id);
             }
-            case "Group.Set": return done({}, 0);
+            case "Virtual.Add": {
+                if (W.vcs.some(v => v.key === p.type + ":" + p.id)) return done(null, -103, "Component already exists");
+                if (W.ghostAdd === p.type + ":" + p.id) return done({ id: p.id }, 0);
+                W.vcs.push({ key: p.type + ":" + p.id, config: p.config, status: { value: p.config.default_value } });
+                let response = { id: p.id };
+                if (p.type === "group" && W.groupCreateResponse) response = W.groupCreateResponse;
+                if (p.type !== "group" && W.controlCreateResponse !== undefined) response = W.controlCreateResponse;
+                return done(response, 0);
+            }
+            case "Group.Set": {
+                const group = W.vcs.find(v => v.key === "group:" + p.id);
+                if (!group) return done(null, -105, "Bad id=" + p.id);
+                group.status = { value: p.value.slice() };
+                return done({}, 0);
+            }
             default: throw new Error("unstubbed: " + m);
         }
     },
@@ -130,7 +145,7 @@ function boot(queued) {
     let now = 0, nextTimer = 0, rpcCount = 0, rpcPeak = 0, timerPeak = 0;
     const asyncShelly = Object.assign({}, Shelly, { call: (m, p, cb, ud) => {
         rpcCount++; rpcPeak = Math.max(rpcPeak, rpcCount);
-        queue.push({ at: now + 10, run: () => { rpcCount--; Shelly.call(m, p, cb, ud); } });
+        queue.push({ method: m, at: now + 10, run: () => { rpcCount--; Shelly.call(m, p, cb, ud); } });
     } });
     const asyncTimer = {
         set: (ms, rep, cb, data) => {
@@ -163,6 +178,14 @@ function boot(queued) {
         if (queue.length && !t.err) t.err = new Error("Asynchronous work did not settle");
         return { rpcPeak, timerPeak };
     };
+    t.step = () => {
+        if (!queue.length || t.err) return;
+        queue.sort((a, b) => a.at - b.at);
+        const event = queue.shift(); now = event.at;
+        ctx.runCallback = event.run;
+        t.drive("runCallback()");
+    };
+    t.pending = () => queue.map(e => e.method || "timer");
     t.drive(SRC);
     t.fcTm = () => t.drive("fcTm()");
     t.loop = () => t.drive("loop()");
@@ -182,7 +205,7 @@ function priceServer(priceFn, opts) {
         const incl = ((en - st) % 3600000) !== 0; // a not-whole-hours span means an inclusive end timestamp
         let rows = [];
         for (let t = st; incl ? t <= en : t < en; t += step) {
-            rows.push('"' + (t / 1000) + '";"x";"' + priceFn(new RealDate(t).getHours()).toFixed(2).replace(".", ",") + '"');
+            rows.push('"' + (t / 1000) + '";"x";"' + priceFn(new RealDate(t).getHours(), t).toFixed(2).replace(".", ",") + '"');
         }
         if (opts.truncate !== undefined) rows = rows.slice(0, opts.truncate);
         const csv = '"h";"d";"p"\n' + rows.join("\n") + "\n";
@@ -370,6 +393,14 @@ const VC_SET = [
     ["boolean:201", "Inverted Relay", false], ["enum:202", "Market Price Country", "ee"],
     ["boolean:200", "Forecast Heat", false], ["number:203", "Forecast Impact +/-", 0],
 ];
+function completeGroup() {
+    const group = W.vcs.find(v => v.key === "group:200");
+    const expected = ["enum:200", "number:200", "boolean:200", "number:203", "enum:201",
+        "number:201", "number:202", "boolean:201", "enum:202"].sort();
+    return group && group.config.name === "Smart Heating" && Array.isArray(group.status.value) &&
+        JSON.stringify(group.status.value.slice().sort()) === JSON.stringify(expected);
+}
+
 W = freshWorld();
 W.device = { gen: 3, app: "Mini1G3", ver: "1.4.4" };
 W.kvs["SmartHeatingSys1"] = JSON.stringify({ LastCalculation: 0, ExistingSchedule: 0, Version: 4.9, VcInstalled: true });
@@ -422,9 +453,14 @@ check("S7c missing SystemData: partial controls are left untouched",
     W.vcs.length === 1 && W.vDeleted.length === 0 && W.schedules.length === 0 &&
     W.relayConfigs.length === 0 && Object.keys(W.kvs).length === 0,
     [W.vcs.length, W.vDeleted, W.schedules.length]);
-check("S7c missing SystemData: ambiguous recovery is explained",
-    prints.slice(partialLogStart).some(line => /incomplete|partial|ambiguous/i.test(line)),
-    prints.slice(partialLogStart));
+const partialLogs = prints.slice(partialLogStart);
+check("S7c repair diagnostic identifies the missing backup",
+    partialLogs.some(line => /backup/i.test(line) && /absent|missing|without/i.test(line)), partialLogs);
+check("S7c repair diagnostic names every missing control",
+    VC_SET.filter(e => e[0] !== "group:200" && e[0] !== "enum:200").every(e =>
+        partialLogs.some(line => line.includes(e[0]) && line.includes(e[1]))), partialLogs);
+check("S7c repair diagnostic gives a recovery action",
+    partialLogs.some(line => /restore.*controls|ManualKVS\s*=\s*true/i.test(line)), partialLogs);
 
 // A missing optional control must not replace an installed inverted-relay
 // configuration with defaults or stale KVS settings, even across retries.
@@ -734,7 +770,7 @@ function vcWorld() {
     W.device = { gen: 3, app: "Mini1G3", ver: "1.4.4" };
     W.http = priceServer(PRICE);
 }
-for (const key of VC_SET.map(e => e[0])) {
+for (const key of VC_SET.slice(1).map(e => e[0])) {
     vcWorld();
     W.fail["Virtual.Add"] = p => p.type + ":" + p.id === key;
     t = boot(); t.fcTm();
@@ -1097,5 +1133,676 @@ t.stale(); t.loop();
 check("S24 same polarity does not disable the working schedule", !t.err && W.schedules[0].id === stableId && W.schedules[0].enable && !W.calls.slice(stableStart).some(c => c.method === "Schedule.Update"));
 
 // =====================================================================
+// S25. A periodic tick cannot overlap an unfinished offline fallback.
+for (const pending of ["Switch.SetConfig", "Schedule.Create", "KVS.set"]) {
+    W = freshWorld(); W.kvs.SmartHeatingConf1 = conf(); W.http = () => [null, -114];
+    t = boot(true); t.fcTm();
+    let steps = 0;
+    while (!t.pending().includes(pending) && !t.err && steps++ < 100) t.step();
+    const reached = t.pending().includes(pending);
+    t.loop(); const limits = t.flush();
+    check("S25 tick during fallback " + pending + " settles with one persisted schedule",
+        reached && !t.err && W.schedules.length === 1 && specHours(W.schedules[0].timespec) === FALLBACK &&
+        JSON.parse(W.kvs.SmartHeatingSys1 || "{}").ExistingSchedule === W.schedules[0].id &&
+        limits.rpcPeak <= 5 && limits.timerPeak <= 5, String(t.err || ""));
+    const fallbackId = W.schedules[0] && W.schedules[0].id;
+    t.loop(); t.flush(); t.loop(); t.flush();
+    check("S25 repeated outage retains the fallback at " + pending,
+        !t.err && W.schedules.length === 1 && W.schedules[0].id === fallbackId);
+    W.http = priceServer(PRICE); t.loop(); t.flush();
+    check("S25 prices recover after overlapping tick at " + pending,
+        !t.err && W.schedules.length === 1 && specHours(W.schedules[0].timespec) === cheapest(EVE.normal, 24, 10, PRICE));
+}
+
+// S26. Unreadable schedule identity never becomes an empty record.
+for (const priorSuccess of [false, true]) {
+    for (const bad of ["read failure", "{", "null", "[]", "{}", '{"ExistingSchedule":null}', '{"ExistingSchedule":-1}', '{"ExistingSchedule":"5"}']) {
+        W = freshWorld(); W.kvs.SmartHeatingConf1 = conf(); W.http = priceServer(PRICE);
+        t = boot(true);
+        if (priorSuccess) { t.fcTm(); t.flush(); }
+        const knownState = t.drive("JSON.stringify(s)");
+        const goodRecord = W.kvs.SmartHeatingSys1;
+        if (bad === "read failure") W.fail["KVS.Get"] = p => p.key === "SmartHeatingSys1";
+        else W.kvs.SmartHeatingSys1 = bad;
+        const before = JSON.stringify([W.kvs, W.schedules, W.relayConfigs]);
+        t.stale(); t.fcTm(); t.flush(); t.loop(); t.flush();
+        check("S26 " + bad + (priorSuccess ? " after success" : " at boot") + " preserves identity and relay",
+            !t.err && JSON.stringify([W.kvs, W.schedules, W.relayConfigs]) === before && t.drive("JSON.stringify(s)") === knownState,
+            String(t.err || ""));
+        delete W.fail["KVS.Get"];
+        if (goodRecord === undefined) delete W.kvs.SmartHeatingSys1;
+        else W.kvs.SmartHeatingSys1 = goodRecord;
+        W.kvs.SmartHeatingConf1 = conf({ HeatingTime: 2 });
+        const oldId = W.schedules[0] && W.schedules[0].id;
+        t.loop(); t.flush();
+        check("S26 corrected record resumes " + bad + "/" + priorSuccess, !t.err && W.schedules.length === 1 &&
+            W.schedules[0].id !== oldId && specHours(W.schedules[0].timespec) === cheapest(EVE.normal, 24, 2, PRICE) &&
+            JSON.parse(W.kvs.SmartHeatingSys1).ExistingSchedule === W.schedules[0].id);
+    }
+}
+
+// A deleted persistence key does not erase a schedule ID already known this boot.
+W = freshWorld(); W.kvs.SmartHeatingConf1 = conf(); W.http = priceServer(PRICE);
+t = boot(true); t.fcTm(); t.flush();
+const deletedRecordId = W.schedules[0].id;
+delete W.kvs.SmartHeatingSys1;
+W.kvs.SmartHeatingConf1 = conf({ HeatingTime: 2 });
+t.stale(); t.loop(); t.flush();
+check("S26 missing SystemData mid-run replaces the known schedule without orphaning it", !t.err &&
+    W.deleted.includes(deletedRecordId) && W.schedules.length === 1 && W.schedules[0].id !== deletedRecordId &&
+    specHours(W.schedules[0].timespec) === cheapest(EVE.normal, 24, 2, PRICE) &&
+    JSON.parse(W.kvs.SmartHeatingSys1).ExistingSchedule === W.schedules[0].id);
+
+// S27. The second occurrence has no cron slot but all its quarters must validate.
+FIXED_MS = new RealDate(EVE.autumn).getTime();
+for (const firstCheap of [false, true]) {
+    W = freshWorld(); W.kvs.SmartHeatingConf1 = conf({ HeatingTime: 1, AlwaysOnPrice: -1 });
+    W.http = priceServer((hour, ms) => hour === 3 ?
+        (new RealDate(ms).getTimezoneOffset() === -180 ? (firstCheap ? 0 : 100) : (firstCheap ? 100 : 0)) : hour === 4 ? 60 : 200);
+    t = boot(true); t.fcTm(); t.flush();
+    check("S27 autumn chooses by the first occurrence (cheap=" + firstCheap + ")",
+        !t.err && W.schedules.length === 1 && specHours(W.schedules[0].timespec) === (firstCheap ? "3" : "4"));
+}
+W = freshWorld(); W.kvs.SmartHeatingConf1 = conf();
+W.http = p => {
+    const res = priceServer(PRICE)(p);
+    const rows = atob(res[0].body_b64).split("\n");
+    rows[18] = rows[18].replace(/;"[^";]+"$/, ';"invalid"'); // second occurrence of 03:00
+    res[0].body_b64 = Buffer.from(rows.join("\n"), "latin1").toString("base64");
+    return res;
+};
+t = boot(); t.fcTm();
+check("S27 malformed second occurrence still rejects the day", !t.err && W.schedules.length === 1 && specHours(W.schedules[0].timespec) === FALLBACK);
+FIXED_MS = new RealDate(EVE.spring).getTime();
+W = freshWorld(); W.kvs.SmartHeatingConf1 = conf({ HeatingTime: 24 }); W.http = priceServer(PRICE);
+t = boot(); t.fcTm();
+check("S27 spring exposes exactly 23 candidates and no hour 3", !t.err && W.schedules.length === 1 &&
+    specHours(W.schedules[0].timespec) === dayHours(EVE.spring).join(","));
+FIXED_MS = new RealDate(EVE.normal).getTime();
+
+// S28. Success without a visible control stops this cycle and recovers on a later one.
+vcWorld(); W.ghostAdd = "number:203";
+t = boot(true); t.fcTm(); const ghostLimits = t.flush();
+check("S28 invisible added control does not loop", !t.err && W.addAttempts.filter(k => k === W.ghostAdd).length === 1 &&
+    W.schedules.length === 0 && t.pending().length === 0 && ghostLimits.rpcPeak <= 5 && ghostLimits.timerPeak <= 5);
+t.loop(); t.flush();
+check("S28 at most one retry per cycle", !t.err && W.addAttempts.filter(k => k === W.ghostAdd).length === 2 && t.pending().length === 0);
+delete W.ghostAdd; t.loop(); t.flush();
+check("S28 later visible repair resumes scheduling", !t.err && W.schedules.length === 1);
+
+// S29. Only KVS mode validates the nine KVS heating values; mode/relay must always be known.
+for (const badSettings of [{ TimePeriod: 8 }, { EnergyProvider: "PARTN24P" }, { HeatingTime: null }, { Country: undefined }]) {
+    vcWorld(); W.vcs = VC_SET.map(e => ({ key: e[0], config: { name: e[1] }, status: { value: e[2] } }));
+    const saved = conf(Object.assign({ ManualKVS: false }, badSettings)); W.kvs.SmartHeatingConf1 = saved;
+    t = boot(true); t.fcTm(); t.flush();
+    check("S29 valid controls override inactive " + Object.keys(badSettings)[0] + " without rewriting KVS",
+        !t.err && W.kvs.SmartHeatingConf1 === saved && W.schedules.length === 1 &&
+        specHours(W.schedules[0].timespec) === cheapest(EVE.normal, 12, 5, PRICE));
+}
+for (const saved of [conf({ ManualKVS: "false" }), conf({ ManualKVS: false, RelayId: null }), "{"]) {
+    vcWorld(); W.vcs = VC_SET.map(e => ({ key: e[0], config: { name: e[1] }, status: { value: e[2] } }));
+    W.kvs.SmartHeatingConf1 = saved; t = boot(true); t.fcTm(); t.flush();
+    check("S29 unknown mode or relay is never guessed: " + saved, !t.err && W.schedules.length === 0 && W.relayConfigs.length === 0 &&
+        !W.calls.some(c => c.method === "Shelly.GetComponents") && W.kvsWrites.length === 0);
+}
+
+// Rejected KVS settings must not leave a mode override active for the next cycle.
+vcWorld(); W.kvs.SmartHeatingConf1 = conf({ ManualKVS: true, HeatingTime: null });
+t = boot(true); t.fcTm(); t.flush();
+check("S29 rejected ManualKVS override pauses without installing or scheduling", !t.err &&
+    W.addAttempts.length === 0 && W.schedules.length === 0 && W.kvsWrites.length === 0);
+delete W.kvs.SmartHeatingConf1; t.loop(); t.flush();
+check("S29 removing rejected KVS record restores VC installation", !t.err && completeGroup() && W.schedules.length === 1 &&
+    W.kvs.SmartHeatingConf1 === undefined && !W.kvsWrites.includes("SmartHeatingConf1"));
+for (const forced of [false, true]) {
+    vcWorld(); const saved = JSON.stringify({ ManualKVS: forced }); W.kvs.SmartHeatingConf1 = saved;
+    const relayLog = prints.length; t = boot(true); t.fcTm(); t.flush();
+    check("S29 saved RelayId is required with ManualKVS=" + forced, !t.err && W.schedules.length === 0 &&
+        W.addAttempts.length === 0 && W.relayConfigs.length === 0 && W.kvsWrites.length === 0 &&
+        W.kvs.SmartHeatingConf1 === saved && prints.slice(relayLog).some(l => l.includes("RelayId")));
+}
+vcWorld(); W.kvs.SmartHeatingConf1 = JSON.stringify({ ManualKVS: false, RelayId: 1 });
+t = boot(true); t.fcTm(); t.flush();
+const selectedRelayCalls = W.calls.filter(c => c.method === "Switch.SetConfig");
+check("S29 VC mode honours saved relay 1 for both timer and schedule", !t.err && completeGroup() &&
+    selectedRelayCalls.length > 0 && selectedRelayCalls.every(c => c.params.id === 1) &&
+    W.schedules.length === 1 && W.schedules[0].calls.every(c => c.method === "Switch.Set" && c.params.id === 1) &&
+    W.kvs.SmartHeatingConf1 === JSON.stringify({ ManualKVS: false, RelayId: 1 }));
+
+// S30. Decorative groups cannot block heating or overwrite customized membership.
+for (const failure of ["Virtual.Add", "Group.Set"]) {
+    vcWorld(); W.fail[failure] = failure === "Virtual.Add" ? p => p.type === "group" : true;
+    t = boot(true); t.fcTm(); const limits = t.flush();
+    check("S30 " + failure + " group failure leaves all controls usable", !t.err && W.schedules.length === 1 &&
+        W.vcs.filter(v => v.key !== "group:200").length === 9 && limits.rpcPeak <= 5 && limits.timerPeak <= 5);
+}
+vcWorld(); t = boot(true); t.fcTm(); t.flush();
+check("S30 fresh group includes all nine controls", completeGroup());
+const customized = W.vcs.find(v => v.key === "group:200");
+customized.config.name = "My controls"; customized.status.value = ["enum:200", "number:205"];
+const groupBefore = JSON.stringify(customized);
+W.vcs = W.vcs.filter(v => v.key !== "number:203");
+const callsBefore = W.calls.length;
+t = boot(true); t.fcTm(); t.flush();
+check("S30 repair preserves renamed group's custom membership", !t.err && W.schedules.length === 1 &&
+    W.vcs.some(v => v.key === "number:203") && JSON.stringify(W.vcs.find(v => v.key === "group:200")) === groupBefore &&
+    !W.calls.slice(callsBefore).some(c => c.method === "Group.Set"));
+vcWorld(); W.vcs = [{ key: "group:200", config: { name: "Personal" }, status: { value: ["number:205"] } }];
+t = boot(true); t.fcTm(); t.flush();
+check("S30 an existing group alone does not block fresh controls", !t.err && W.schedules.length === 1 &&
+    W.vcs[0].config.name === "Personal" && W.vcs[0].status.value.join(",") === "number:205");
+vcWorld(); W.vcs = VC_SET.filter(e => e[0] !== "number:203").map(e => ({ key: e[0], config: { name: e[1] }, status: { value: e[2] } }));
+const missingStart = prints.length; t = boot(); t.fcTm();
+check("S30 backupless repair names the missing control and paused state", !t.err && W.schedules.length === 0 &&
+    prints.slice(missingStart).some(line => line.includes("Schedule updates are paused") && line.includes("number:203") && line.includes("Forecast Impact")));
+
+vcWorld(); t = boot(true); t.fcTm(); t.flush();
+W.vcs = W.vcs.filter(v => v.key !== "group:200" && v.key !== "number:203");
+t = boot(true); t.fcTm(); t.flush();
+check("S30 group created during repair receives all nine controls", !t.err && W.schedules.length === 1 &&
+    completeGroup());
+
+// A complete read remembers an existing installation even when group and control disappear together.
+vcWorld(); W.vcs = VC_SET.map(e => ({ key: e[0], config: { name: e[1] }, status: { value: e[2] } }));
+t = boot(true); t.fcTm(); t.flush();
+const completeReadId = W.schedules[0].id;
+W.vcs = W.vcs.filter(v => v.key !== "group:200" && v.key !== "number:203");
+const sameRunCalls = W.calls.length;
+t.stale(); t.loop(); t.flush();
+check("S30 same-run group and control deletion restores only the control", !t.err &&
+    W.vcs.find(v => v.key === "number:203")?.status.value === 0 && !W.vcs.some(v => v.key === "group:200") &&
+    W.schedules.length === 1 && W.schedules[0].id !== completeReadId &&
+    !W.calls.slice(sameRunCalls).some(c => c.method === "Group.Set" || c.method === "Virtual.Add" && c.params.type === "group"));
+
+// S31. Other jobs are diagnostic only, including same-relay schedules owned by another instance.
+W = freshWorld(); W.kvs.SmartHeatingConf1 = conf(); W.http = priceServer(PRICE);
+const otherJob = { id: 41, enable: true, timespec: "0 0 1 * * *", calls: [{ method: "Switch.Set", params: { id: 0, on: false } }] };
+W.schedules.push(otherJob); const otherBefore = JSON.stringify(otherJob), logStart = prints.length;
+t = boot(true); t.fcTm(); t.flush();
+check("S31 first calculation diagnoses the extra job before an ID is recorded",
+    prints.slice(logStart).some(line => line.includes("Additional schedule ID 41")));
+t.stale(); t.loop(); t.flush();
+check("S31 diagnostic is printed only once per boot",
+    prints.slice(logStart).filter(line => line.includes("Additional schedule ID")).length === 1);
+check("S31 extra relay schedule is logged, preserved, and does not block scheduling", !t.err && W.schedules.length === 2 &&
+    JSON.stringify(W.schedules.find(s => s.id === 41)) === otherBefore && !W.deleted.includes(41) &&
+    prints.slice(logStart).some(line => line.includes("Additional schedule ID 41") && line.includes("Scheduling continues")));
+W = freshWorld(); W.kvs.SmartHeatingConf1 = conf(); W.http = priceServer(PRICE); W.fail["Schedule.List"] = true;
+t = boot(true); t.fcTm(); t.flush();
+check("S31 failed diagnostic read with no recorded ID still schedules", !t.err && W.schedules.length === 1);
+
+W = freshWorld(); t = boot();
+check("S31 short firmware version cannot pass a higher patch minimum", !t.verC("1.4.3", "1.4") && t.verC("1.4.3", "1.4.3") && t.verC("1.4.3", "1.5"));
+
+// S32. Unknown backups never authorize default initialization, repair, or deletion advice.
+const recoveryValues = ["12", 2, false, "NONE", 1, 50, true, "ee", 0];
+for (const controls of ["absent", "partial", "complete"]) {
+    for (const failure of ["read failure", "{", "null", '["8",2,false,"NONE",1,50,true,"ee",0]']) {
+        vcWorld();
+        if (controls !== "absent") W.vcs = VC_SET.filter(e => controls === "complete" || e[0] !== "number:203")
+            .map(e => ({ key: e[0], config: { name: e[1] }, status: { value: e[2] } }));
+        W.kvs.SmartHeatingVC1 = failure === "read failure" ? JSON.stringify(recoveryValues) : failure;
+        if (failure === "read failure") W.fail["KVS.Get"] = p => p.key === "SmartHeatingVC1";
+        const oldBackup = W.kvs.SmartHeatingVC1, start = prints.length;
+        t = boot(true); t.fcTm(); t.flush(); t.loop(); t.flush();
+        const logs = prints.slice(start);
+        if (controls === "complete") {
+            check("S32 live controls remain authoritative despite " + failure, !t.err && W.schedules.length === 1 &&
+                specHours(W.schedules[0].timespec) === cheapest(EVE.normal, 12, 5, PRICE));
+        } else {
+            check("S32 " + controls + "/" + failure + " preserves unreadable backup without installing defaults", !t.err &&
+                W.kvs.SmartHeatingVC1 === oldBackup && W.kvsWrites.length === 0 && W.addAttempts.length === 0 &&
+                W.schedules.length === 0 && W.relayConfigs.length === 0 &&
+                !logs.some(l => /remov.*reserved/i.test(l)), logs);
+            W.kvs.SmartHeatingVC1 = JSON.stringify(recoveryValues); delete W.fail["KVS.Get"];
+            t.loop(); t.flush();
+            const restored = W.vcs.find(v => v.key === "number:203");
+            check("S32 " + controls + "/" + failure + " recovers from verified backup", !t.err && W.schedules.length === 1 && restored &&
+                (controls !== "absent" || (W.schedules[0].calls[0].params.on === false && W.vcs.find(v => v.key === "number:202").status.value === 50)));
+        }
+        check("S32 " + controls + "/" + failure + " identifies the backup key and failure", logs.some(l =>
+            l.includes("SmartHeatingVC1") && /read failed|not valid JSON|backup is invalid/.test(l)));
+    }
+}
+vcWorld(); W.vcs = VC_SET.filter(e => e[0] !== "number:203").map(e => ({ key: e[0], config: { name: e[1] }, status: { value: e[2] } }));
+const absentBackupStart = prints.length; t = boot(true); t.fcTm(); t.flush();
+check("S32 confirmed missing backup permits explicit reinstall advice", prints.slice(absentBackupStart).some(l =>
+    l.includes("confirmed absent") && l.includes("reserved controls")) && W.addAttempts.length === 0);
+// Previously validated cache values repair only missing controls; live survivors win in the first write.
+const backupKeys = ["enum:200", "number:200", "boolean:200", "enum:201", "number:201",
+    "number:202", "boolean:201", "enum:202", "number:203"];
+for (const outcome of ["read failure", "invalid JSON", "invalid values"]) {
+    for (const missingKey of backupKeys) {
+        vcWorld(); W.pageSize = 2;
+        W.vcs = VC_SET.map(e => ({ key: e[0], config: { name: e[1] },
+            status: { value: e[0] === "group:200" ? ["enum:200"] : recoveryValues[backupKeys.indexOf(e[0])] } }));
+        t = boot(true); t.fcTm(); t.flush();
+        const oldId = W.schedules[0].id;
+        const liveValues = ["6", 3, false, "NONE", 2, 40, false, "ee", 1];
+        W.vcs = W.vcs.filter(v => v.key !== missingKey);
+        for (const v of W.vcs) if (v.key !== "group:200") v.status.value = liveValues[backupKeys.indexOf(v.key)];
+        const survivors = JSON.stringify(W.vcs);
+        const expected = liveValues.slice(); expected[backupKeys.indexOf(missingKey)] = recoveryValues[backupKeys.indexOf(missingKey)];
+        if (outcome === "read failure") W.fail["KVS.Get"] = p => p.key === "SmartHeatingVC1";
+        else W.kvs.SmartHeatingVC1 = outcome === "invalid JSON" ? "{" : '["8",2,false,"NONE",1,50,true,"ee",0]';
+        const callStart = W.calls.length, repairLog = prints.length;
+        t.stale(); t.loop(); const limits = t.flush();
+        const calls = W.calls.slice(callStart);
+        const writes = calls.filter(c => /^KVS\.set$/i.test(c.method) && c.params.key === "SmartHeatingVC1");
+        check("S32 cached repair " + outcome + "/" + missingKey + " restores only the missing value and updates heating", !t.err &&
+            W.vcs.find(v => v.key === missingKey)?.status.value === expected[backupKeys.indexOf(missingKey)] &&
+            JSON.stringify(W.vcs.filter(v => v.key !== missingKey)) === survivors &&
+            W.schedules.length === 1 && W.schedules[0].id !== oldId && W.deleted.includes(oldId) &&
+            limits.rpcPeak <= 5 && limits.timerPeak <= 5);
+        check("S32 cached repair " + outcome + "/" + missingKey + " saves merged live values before adding", writes.length === 1 &&
+            writes[0].params.value === JSON.stringify(expected) && W.kvs.SmartHeatingVC1 === JSON.stringify(expected) &&
+            calls.indexOf(writes[0]) < calls.findIndex(c => c.method === "Virtual.Add"), writes);
+        check("S32 cached repair explains manual grouping " + outcome + "/" + missingKey,
+            prints.slice(repairLog).some(l => /group membership.*unchanged/i.test(l) && /manually/i.test(l)));
+    }
+}
+// A cache cannot turn an invalid surviving value into a repair decision.
+for (const outcome of ["read failure", "invalid JSON"]) {
+    vcWorld(); t = boot(true); t.fcTm(); t.flush();
+    W.vcs = W.vcs.filter(v => v.key !== "number:203");
+    W.vcs.find(v => v.key === "number:202").status.value = null;
+    if (outcome === "read failure") W.fail["KVS.Get"] = p => p.key === "SmartHeatingVC1";
+    else W.kvs.SmartHeatingVC1 = "{";
+    const before = JSON.stringify([W.kvs, W.vcs, W.schedules]), writes = W.kvsWrites.length;
+    t.stale(); t.loop(); t.flush();
+    check("S32 cached repair validates surviving values after " + outcome, !t.err &&
+        JSON.stringify([W.kvs, W.vcs, W.schedules]) === before && W.kvsWrites.length === writes);
+}
+// A failed merged-backup write neither starts repair nor mutates the previously validated cache.
+vcWorld(); W.vcs = VC_SET.map(e => ({ key: e[0], config: { name: e[1] },
+    status: { value: e[0] === "group:200" ? [] : recoveryValues[backupKeys.indexOf(e[0])] } }));
+t = boot(true); t.fcTm(); t.flush();
+W.vcs = W.vcs.filter(v => v.key !== "number:203");
+W.vcs.find(v => v.key === "number:202").status.value = 40;
+W.kvs.SmartHeatingVC1 = "{";
+W.fail["KVS.set"] = p => p.key === "SmartHeatingVC1";
+const failedRepairBefore = JSON.stringify([W.vcs, W.schedules]);
+t.stale(); t.loop(); t.flush();
+check("S32 failed merged backup write leaves controls and schedule unchanged", !t.err &&
+    JSON.stringify([W.vcs, W.schedules]) === failedRepairBefore && W.kvs.SmartHeatingVC1 === "{");
+W.vcs = W.vcs.filter(v => v.key !== "number:202");
+delete W.fail["KVS.set"]; t.loop(); t.flush();
+check("S32 failed write did not replace the validated cache", !t.err &&
+    W.vcs.find(v => v.key === "number:202")?.status.value === 50 &&
+    W.vcs.find(v => v.key === "number:203")?.status.value === 0);
+
+// S33. Group work starts last and retries at most once per cycle without durable markers.
+vcWorld(); W.fail["Virtual.Add"] = p => p.type === "number" && p.id === 203;
+t = boot(true); t.fcTm(); t.flush();
+check("S33 failed required control never leaves a prematurely created group", !t.err && !W.vcs.some(v => v.key === "group:200"));
+delete W.fail["Virtual.Add"]; t.loop(); t.flush();
+check("S33 resumed control batch completes group membership", !t.err && W.schedules.length === 1 &&
+    completeGroup());
+for (const failure of ["create", "populate"]) {
+    vcWorld();
+    if (failure === "create") W.fail["Virtual.Add"] = p => p.type === "group";
+    else W.fail["Group.Set"] = true;
+    t = boot(true); t.fcTm(); t.flush();
+    const attempts = () => W.calls.filter(c => failure === "create" ? c.method === "Virtual.Add" && c.params.type === "group" : c.method === "Group.Set").length;
+    check("S33 " + failure + " failure does not block heating", !t.err && W.schedules.length === 1 && attempts() === 1);
+    const idleCalls = W.calls.length, idleSchedule = JSON.stringify(W.schedules);
+    W.fail["Schedule.Create"] = true; //an idle group retry must never open a replacement gap
+    t.loop(); t.flush(); t.loop(); t.flush();
+    check("S33 " + failure + " pending on idle ticks makes zero RPCs and preserves the schedule", !t.err &&
+        W.calls.length === idleCalls && JSON.stringify(W.schedules) === idleSchedule);
+    delete W.fail["Schedule.Create"];
+    t.stale(); t.loop(); t.flush();
+    check("S33 " + failure + " retries only during a required calculation", !t.err && attempts() === 2);
+    W.fail = {}; t.stale(); t.loop(); const limits = t.flush();
+    check("S33 " + failure + " eventually populates the group", !t.err && attempts() === 3 &&
+        completeGroup() && limits.rpcPeak <= 5 && limits.timerPeak <= 5);
+    const completed = attempts(); t.stale(); t.loop(); t.flush();
+    check("S33 " + failure + " stops retrying after success, without extra KVS records", attempts() === completed &&
+        Object.keys(W.kvs).every(k => k === "SmartHeatingVC1" || k === "SmartHeatingSys1") &&
+        Object.keys(JSON.parse(W.kvs.SmartHeatingSys1)).sort().join(",") === "ExistingSchedule,LastCalculation,Version");
+}
+
+// Another occupant appearing before a failed create must never authorize Group.Set.
+vcWorld(); const occupiedLog = prints.length;
+W.fail["Virtual.Add"] = p => {
+    if (p.type !== "group") return false;
+    W.vcs.push({ key: "group:200", config: { name: "Other script" }, status: { value: ["number:250"] } });
+    return false; // normal stub returns already-exists after the competing creation
+};
+t = boot(true); t.fcTm(); t.flush(); W.fail = {};
+t.stale(); t.loop(); t.flush();
+check("S33 occupied group stops creation retries and preserves membership", !t.err && W.schedules.length === 1 &&
+    W.addAttempts.filter(k => k === "group:200").length === 1 && !W.calls.some(c => c.method === "Group.Set") &&
+    W.vcs.find(v => v.key === "group:200").status.value.join(",") === "number:250" &&
+    prints.slice(occupiedLog).some(l => l.includes("occupied group:200") && l.includes("retries stopped")));
+
+// Deletion after our successful create cancels population and never rearms creation.
+vcWorld(); let removedCreatedGroup = false; const deletedGroupLog = prints.length;
+W.observe = () => {
+    const call = W.calls[W.calls.length - 1];
+    if (!removedCreatedGroup && call.method === "Virtual.Add" && call.params.type === "group") {
+        W.vcs = W.vcs.filter(v => v.key !== "group:200"); removedCreatedGroup = true;
+    }
+};
+t = boot(true); t.fcTm(); t.flush(); delete W.observe;
+W.vcs = W.vcs.filter(v => v.key !== "number:203");
+t.stale(); t.loop(); t.flush(); t.stale(); t.loop(); t.flush();
+check("S33 deleted new group remains absent even during later control repair", !t.err && removedCreatedGroup && W.schedules.length === 1 &&
+    W.addAttempts.filter(k => k === "group:200").length === 1 && W.calls.filter(c => c.method === "Group.Set").length === 1 &&
+    !W.vcs.some(v => v.key === "group:200") && W.vcs.some(v => v.key === "number:203") &&
+    prints.slice(deletedGroupLog).some(l => l.includes("group:200 no longer exists") && l.includes("will not be recreated")));
+
+// A restart discards creation evidence. Never populate an existing empty group by inference.
+vcWorld(); t = boot(true); t.fcTm();
+let restartSteps = 0;
+while (!t.pending().includes("Group.Set") && !t.err && restartSteps++ < 100) t.step();
+const interruptedCreate = t.pending().includes("Group.Set");
+t = boot(true); t.fcTm(); t.flush(); t.stale(); t.loop(); t.flush();
+check("S33 restart before population preserves the existing empty group", interruptedCreate && !t.err && W.schedules.length === 1 &&
+    W.calls.filter(c => c.method === "Group.Set").length === 0 && W.vcs.find(v => v.key === "group:200").status.value === undefined);
+
+vcWorld(); t = boot(true); t.fcTm(); t.flush();
+W.vcs.find(v => v.key === "group:200").status.value = [];
+W.vcs = W.vcs.filter(v => v.key !== "number:203");
+t.stale(); t.loop(); t.flush();
+check("S33 intentionally emptied completed group stays empty during repair", !t.err && W.schedules.length === 1 &&
+    W.vcs.find(v => v.key === "group:200").status.value.length === 0 && W.calls.filter(c => c.method === "Group.Set").length === 1);
+
+// S34. Diagnostics name the actual fault and do not flood successful calculations.
+vcWorld(); W.device = { gen: 2, app: "Pro1" }; W.kvs.SmartHeatingConf1 = conf({ ManualKVS: false });
+const firmwareLog = prints.length; t = boot(true); t.fcTm(); t.flush();
+check("S34 missing firmware version is not blamed on configuration JSON", !t.err && W.schedules.length === 1 &&
+    !prints.slice(firmwareLog).some(l => l.includes("not valid JSON")));
+W = freshWorld(); W.kvs.SmartHeatingConf1 = conf(); W.http = priceServer(PRICE);
+W.fail["KVS.Get"] = p => p.key === "SmartHeatingSys1";
+const sysReadLog = prints.length; t = boot(true); t.fcTm(); t.flush();
+check("S34 SystemData read logs the RPC reason", prints.slice(sysReadLog).some(l => l.includes("SystemData read failed") && l.includes("forced failure")));
+W = freshWorld(); W.kvs.SmartHeatingConf1 = conf(); W.http = priceServer(PRICE);
+W.fail["KVS.set"] = p => p.key === "SmartHeatingSys1";
+const sysWriteLog = prints.length; t = boot(true); t.fcTm(); t.flush();
+check("S34 SystemData write uses the documented paused message", prints.slice(sysWriteLog).some(l =>
+    l.includes("Schedule updates are paused") && l.includes("could not be saved")));
+vcWorld(); W.vcs = VC_SET.map(e => ({ key: e[0], config: { name: e[0] === "group:200" ? "Personal group" : e[1] }, status: { value: e[2] } }));
+const groupLog = prints.length; t = boot(true); t.fcTm(); t.flush(); t.stale(); t.loop(); t.flush();
+check("S34 differing group name gets one informational notice", !t.err && W.schedules.length === 1 &&
+    prints.slice(groupLog).filter(l => l.includes("Existing group:200 has a different name")).length === 1 &&
+    !W.calls.some(c => c.method === "Group.Set"));
+
+// S35. Three retryable failures per boot, shared across creation and population.
+for (const phase of ["create", "populate"]) {
+    vcWorld();
+    if (phase === "create") {
+        W.vcs = [{ key: "number:250", config: { name: "Other control" }, status: { value: 1 } }];
+        W.fail["Virtual.Add"] = p => p.type === "group" && W.vcs.length >= 10;
+    } else W.fail["Group.Set"] = true;
+    const capLog = prints.length;
+    t = boot(true); t.fcTm(); t.flush();
+    const attempts = () => W.calls.filter(c => phase === "create" ? c.method === "Virtual.Add" && c.params.type === "group" : c.method === "Group.Set").length;
+    for (let retry = 0; retry < 2; retry++) { t.stale(); t.loop(); t.flush(); }
+    check("S35 " + phase + " reaches its three-failure cap without interrupting heating", !t.err && attempts() === 3 && W.schedules.length === 1);
+    const oldId = W.schedules[0] && W.schedules[0].id;
+    const httpBefore = W.calls.filter(c => c.method === "HTTP.GET").length;
+    for (let retry = 0; retry < 2; retry++) { t.stale(); t.loop(); t.flush(); }
+    check("S35 " + phase + " stops group retries but continues required heating updates", !t.err && attempts() === 3 &&
+        W.schedules.length === 1 && W.schedules[0].id !== oldId && W.schedules[0].enable &&
+        W.calls.filter(c => c.method === "HTTP.GET").length === httpBefore + 2 &&
+        JSON.parse(W.kvs.SmartHeatingSys1).ExistingSchedule === W.schedules[0].id);
+    check("S35 " + phase + " prints the manual-grouping message once", prints.slice(capLog).filter(l =>
+        l.includes("three retryable failures") && l.includes("manually")).length === 1);
+    const idleStart = W.calls.length; t.loop(); t.flush();
+    check("S35 " + phase + " remains idle after cap exhaustion", !t.err && W.calls.length === idleStart);
+    if (phase === "create") {
+        // Restarting a complete ungrouped installation does not infer permission to recreate it.
+        const completeStart = W.calls.length;
+        t = boot(true); t.fcTm(); t.flush();
+        check("S35 complete ungrouped install stays ungrouped after restart", !t.err && W.schedules.length === 1 &&
+            !W.vcs.some(v => v.key === "group:200") && !W.calls.slice(completeStart).some(c => c.method === "Virtual.Add" || c.method === "Group.Set"));
+        // A real control repair may arm creation again, with a fresh per-boot failure budget.
+        W.vcs = W.vcs.filter(v => v.key !== "number:203");
+        const repairedStart = W.calls.length, restartedLog = prints.length;
+        t = boot(true); t.fcTm(); t.flush();
+        check("S35 restart with a missing control permits a new group attempt", !t.err &&
+            W.vcs.some(v => v.key === "number:203") && W.calls.slice(repairedStart).filter(c => c.method === "Virtual.Add" && c.params.type === "group").length === 1);
+        t.stale(); t.loop(); t.flush();
+        check("S35 restarted repair has a fresh failure budget", !t.err &&
+            W.calls.slice(repairedStart).filter(c => c.method === "Virtual.Add" && c.params.type === "group").length === 2 &&
+            !prints.slice(restartedLog).some(l => l.includes("three retryable failures")));
+    }
+}
+vcWorld(); W.fail["Virtual.Add"] = p => p.type === "group";
+const sharedLog = prints.length; t = boot(true); t.fcTm(); t.flush(); // retryable failure 1: create
+W.fail = { "Group.Set": true }; t.stale(); t.loop(); t.flush(); // create succeeds; retryable failure 2: populate
+check("S35 successful creation does not consume the shared failure budget", !t.err &&
+    !prints.slice(sharedLog).some(l => l.includes("three retryable failures")));
+t.stale(); t.loop(); t.flush(); // retryable failure 3: populate
+const sharedAttempts = W.calls.filter(c => c.method === "Group.Set").length;
+t.stale(); t.loop(); t.flush();
+check("S35 creation and population share one failure cap", !t.err && sharedAttempts === 2 &&
+    W.calls.filter(c => c.method === "Group.Set").length === 2 && W.schedules.length === 1 &&
+    prints.slice(sharedLog).filter(l => l.includes("three retryable failures")).length === 1);
+
+for (const terminal of ["occupied", "deleted"]) {
+    vcWorld();
+    if (terminal === "occupied") W.fail["Virtual.Add"] = p => p.type === "group";
+    else W.fail["Group.Set"] = true;
+    const terminalLog = prints.length;
+    t = boot(true); t.fcTm(); t.flush(); t.stale(); t.loop(); t.flush(); // two retryable failures
+    W.fail = {};
+    if (terminal === "occupied") W.vcs.push({ key: "group:200", config: { name: "Someone else's group" }, status: { value: [] } });
+    else W.vcs = W.vcs.filter(v => v.key !== "group:200");
+    t.stale(); t.loop(); t.flush(); // terminal outcome, not a third retryable failure
+    const stoppedAt = W.calls.length; t.stale(); t.loop(); t.flush();
+    check("S35 " + terminal + " stops retries without consuming the remaining budget", !t.err && W.schedules.length === 1 &&
+        !prints.slice(terminalLog).some(l => l.includes("three retryable failures")) &&
+        !W.calls.slice(stoppedAt).some(c => c.method === "Group.Set" || (c.method === "Virtual.Add" && c.params.type === "group")));
+}
+
+// S36. A short status inventory followed by a complete config inventory needs no destructive recovery.
+for (const backup of [false, true]) {
+    for (const group of [false, true]) {
+        vcWorld(); W.pageSize = 3;
+        W.vcs = VC_SET.filter(e => group || e[0] !== "group:200").map(e => ({ key: e[0], config: { name: e[1] }, status: { value: e[2] } }));
+        if (backup) W.kvs.SmartHeatingVC1 = JSON.stringify(["12",5,false,"NONE",1,300,false,"ee",0]);
+        W.kvs.SmartHeatingSys1 = JSON.stringify({ ExistingSchedule: 41, Version: 5 });
+        W.schedules = [{ id: 41, enable: true, timespec: "0 0 1 * * *", calls: [{ method: "Switch.Set", params: { id: 0, on: true } }] }];
+        W.hiddenStatusKey = "number:203";
+        const before = JSON.stringify([W.kvs, W.vcs, W.schedules]), logStart = prints.length;
+        t = boot(true); t.fcTm(); t.flush();
+        const logs = prints.slice(logStart);
+        check("S36 complete inventory, backup=" + backup + ", group=" + group + ": wait without deletion advice or changes",
+            !t.err && JSON.stringify([W.kvs, W.vcs, W.schedules]) === before && W.kvsWrites.length === 0 &&
+            W.addAttempts.length === 0 && W.relayConfigs.length === 0 &&
+            logs.some(l => l.includes("waiting for a complete read")) &&
+            !logs.some(l => /remov.*reserved|Missing controls: none/.test(l)), logs);
+        delete W.hiddenStatusKey; t.loop(); t.flush();
+        check("S36 complete status read resumes, backup=" + backup + ", group=" + group,
+            !t.err && W.schedules.length === 1 && W.schedules[0].id !== 41 && W.addAttempts.length === 0);
+    }
+}
+
+// Observing an existing group must survive a later value-validation refusal.
+for (const valueProblem of ["unreadable", "invalid"]) {
+    vcWorld(); W.pageSize = 2;
+    W.vcs = VC_SET.filter(e => e[0] !== "number:203").map(e =>
+        ({ key: e[0], config: { name: e[1] }, status: { value: e[2] } }));
+    W.kvs.SmartHeatingVC1 = JSON.stringify(["12",5,false,"NONE",1,300,false,"ee",0]);
+    if (valueProblem === "unreadable") W.hiddenStatusKey = "number:202";
+    else W.vcs.find(v => v.key === "number:202").status.value = null;
+    const before = JSON.stringify([W.kvs, W.vcs]);
+    const failureLog = prints.length; t = boot(true); t.fcTm(); t.flush();
+    check("S36 observed group with " + valueProblem + " surviving value pauses repair", !t.err &&
+        JSON.stringify([W.kvs, W.vcs]) === before && W.addAttempts.length === 0 && W.kvsWrites.length === 0 &&
+        W.schedules.length === 0 && prints.slice(failureLog).some(l => l.includes("Schedule updates are paused") &&
+            (valueProblem === "unreadable" ? l.includes("waiting for a complete read") : l.includes("AlwaysOffPrice"))));
+    W.vcs = W.vcs.filter(v => v.key !== "group:200");
+    delete W.hiddenStatusKey;
+    W.vcs.find(v => v.key === "number:202").status.value = 300;
+    t.loop(); t.flush();
+    check("S36 group deleted after " + valueProblem + " repair refusal stays deleted when values heal", !t.err &&
+        W.vcs.find(v => v.key === "number:203")?.status.value === 0 && W.schedules.length === 1 &&
+        !W.vcs.some(v => v.key === "group:200") && !W.addAttempts.includes("group:200") &&
+        !W.calls.some(c => c.method === "Group.Set"));
+}
+
+// S37. Only a verified numeric create response grants permission to populate.
+for (const response of [{}, { id: 201 }, { id: "200" }]) {
+    vcWorld(); W.groupCreateResponse = response;
+    const unverifiedLog = prints.length;
+    t = boot(true); t.fcTm(); t.flush(); t.stale(); t.loop(); t.flush();
+    check("S37 unverified create response " + JSON.stringify(response) + " never authorizes population", !t.err &&
+        W.schedules.length === 1 && !W.calls.some(c => c.method === "Group.Set") &&
+        W.addAttempts.filter(k => k === "group:200").length === 1 &&
+        W.vcs.find(v => v.key === "group:200").status.value === undefined);
+    const logs = prints.slice(unverifiedLog);
+    check("S37 unverified create response " + JSON.stringify(response) + " explains uncertainty",
+        logs.some(l => l.includes("creation was not verified") && l.includes("membership left unchanged")) &&
+        !logs.some(l => /not added|creation failed|occupied group:200/.test(l)), logs);
+    W.vcs.find(v => v.key === "group:200").config.name = "User-renamed";
+    const renameLog = prints.length;
+    t.stale(); t.loop(); t.flush(); t.stale(); t.loop(); t.flush();
+    check("S37 unverified response does not suppress a later rename notice " + JSON.stringify(response), !t.err &&
+        prints.slice(renameLog).filter(l => l.includes("Existing group:200 has a different name")).length === 1 &&
+        !W.calls.some(c => c.method === "Group.Set"));
+}
+
+// S38. The backup outcome distinguishes a failed read from a missing or corrupt record.
+for (const outcome of ["succeeded", "failed", "missing", "invalid JSON", "invalid values", "failed with changed controls"]) {
+    vcWorld(); W.vcs = VC_SET.map(e => ({ key: e[0], config: { name: e[1] }, status: { value: e[2] } }));
+    t = boot(true); t.fcTm(); t.flush();
+    const goodBackup = W.kvs.SmartHeatingVC1;
+    const beforeWrites = W.kvsWrites.filter(k => k === "SmartHeatingVC1").length;
+    if (outcome.startsWith("failed")) W.fail["KVS.Get"] = p => p.key === "SmartHeatingVC1";
+    if (outcome === "missing") delete W.kvs.SmartHeatingVC1;
+    if (outcome === "invalid JSON") W.kvs.SmartHeatingVC1 = "{";
+    if (outcome === "invalid values") W.kvs.SmartHeatingVC1 = '["8",5,false,"NONE",1,300,false,"ee",0]';
+    if (outcome === "failed with changed controls") W.vcs.find(v => v.key === "number:200").status.value = 2;
+    t.stale(); t.loop(); t.flush(); t.stale(); t.loop(); t.flush();
+    const expected = JSON.parse(goodBackup);
+    if (outcome === "failed with changed controls") expected[1] = 2;
+    const writes = W.kvsWrites.filter(k => k === "SmartHeatingVC1").length - beforeWrites;
+    check("S38 " + outcome + " writes only when needed and preserves authoritative live values", !t.err && W.schedules.length === 1 &&
+        W.kvs.SmartHeatingVC1 === JSON.stringify(expected) &&
+        writes === (["succeeded", "failed"].includes(outcome) ? 0 : 1), writes);
+}
+
+// S39. Diagnose the first successful job list once, then skip unused lists with no own schedule.
+W = freshWorld(); W.http = priceServer(PRICE); W.kvs.SmartHeatingConf1 = conf({ HeatingTime: 0, AlwaysOnPrice: -1 });
+const externalJob = id => ({ id, enable: true, timespec: "0 0 1 * * *", calls: [{ method: "Switch.Set", params: { id: 0, on: true } }] });
+W.schedules = [externalJob(41), externalJob(42)];
+const listLog = prints.length; t = boot(true); t.fcTm(); t.flush();
+check("S39 every matching job in the first successful list is reported", [41,42].every(id => prints.slice(listLog).filter(l => l.includes("Additional schedule ID " + id)).length === 1));
+W.schedules.push(externalJob(43)); const originalJobs = JSON.stringify(W.schedules), listStart = W.calls.length;
+t.stale(); t.loop(); t.flush();
+check("S39 no recorded ID and emitted notice skips Schedule.List", !t.err &&
+    !W.calls.slice(listStart).some(c => c.method === "Schedule.List") && JSON.stringify(W.schedules) === originalJobs &&
+    JSON.parse(W.kvs.SmartHeatingSys1).ExistingSchedule === 0);
+check("S39 later matching jobs are not tracked or announced", prints.slice(listLog).filter(l => l.includes("Additional schedule ID")).length === 2);
+
+// S40. Capability checks are quiet and reject non-string firmware values without throwing.
+for (const ver of [140, {}, ["1.4.4"]]) {
+    vcWorld(); W.device = { gen: 2, app: "Pro1", ver }; W.kvs.SmartHeatingConf1 = conf({ ManualKVS: false });
+    t = boot(true); t.fcTm(); t.flush();
+    check("S40 non-string firmware " + JSON.stringify(ver) + " does not throw", !t.err && W.schedules.length === 1, String(t.err || ""));
+}
+W = freshWorld(); W.http = priceServer(PRICE); W.kvs.SmartHeatingConf1 = conf();
+const modeLog = prints.length; t = boot(true); t.fcTm(); t.flush();
+check("S40 KVS selection prints one mode line per calculation", prints.slice(modeLog).filter(l => /forcing KVS mode|Script in KVS mode/.test(l)).length === 1);
+
+// The single mode line explains why controls are unavailable.
+for (const forced of [false, true]) {
+    W = freshWorld(); W.http = priceServer(PRICE);
+    if (forced) W.device = { gen: 3, app: "Plus1PM", ver: "1.4.4" };
+    W.kvs.SmartHeatingConf1 = conf({ ManualKVS: forced });
+    const reasonLog = prints.length; t = boot(true); t.fcTm(); t.flush();
+    const lines = prints.slice(reasonLog).filter(l => /forcing KVS mode|Script in KVS mode/.test(l));
+    check("S40 KVS mode explains " + (forced ? "ManualKVS override" : "unsupported hardware"), !t.err &&
+        W.schedules.length === 1 && W.addAttempts.length === 0 && lines.length === 1 &&
+        lines[0].includes(forced ? "forced by ManualKVS=true" : "device does not meet Virtual Component requirements"), lines);
+}
+
+// S41. Even an empty first successful schedule scan completes the per-boot diagnostic.
+for (const firstReadFails of [false, true]) {
+    W = freshWorld(); W.http = priceServer(PRICE); W.kvs.SmartHeatingConf1 = conf({ HeatingTime: 0, AlwaysOnPrice: -1 });
+    if (firstReadFails) W.fail["Schedule.List"] = true;
+    const scanLog = prints.length; t = boot(true); t.fcTm(); t.flush();
+    if (firstReadFails) { delete W.fail["Schedule.List"]; t.stale(); t.loop(); t.flush(); }
+    const firstScans = W.calls.filter(c => c.method === "Schedule.List").length;
+    check("S41 " + (firstReadFails ? "failed then successful" : "successful") + " empty scan was attempted", !t.err &&
+        firstScans === (firstReadFails ? 2 : 1) && W.schedules.length === 0);
+    W.schedules.push({ id: 41, enable: true, timespec: "0 0 1 * * *", calls: [{ method: "Switch.Set", params: { id: 0, on: true } }] });
+    const laterJobs = JSON.stringify(W.schedules);
+    t.stale(); t.loop(); t.flush(); t.stale(); t.loop(); t.flush();
+    check("S41 empty successful scan latches, failed scan does not (first failure=" + firstReadFails + ")", !t.err &&
+        W.calls.filter(c => c.method === "Schedule.List").length === firstScans && JSON.stringify(W.schedules) === laterJobs &&
+        !prints.slice(scanLog).some(l => l.includes("Additional schedule ID")));
+}
+
+// S42. Price-only mode cannot derive historical heating hours; preserve the prior relay and schedule.
+for (const inverted of [false, true]) {
+    for (const prior of [false, true]) {
+        W = freshWorld(); W.http = priceServer(PRICE);
+        W.kvs.SmartHeatingConf1 = conf({ TimePeriod: 0, AlwaysOnPrice: 20, InvertedRelay: inverted });
+        t = boot(true);
+        if (prior) { t.fcTm(); t.flush(); }
+        const existing = JSON.stringify([W.kvs, W.schedules, W.relayConfigs]);
+        const errorLog = prints.length;
+        W.http = () => [null, -114]; t.stale(); t.fcTm(); t.flush(); t.loop(); t.flush();
+        check("S42 threshold-only outage preserves state, inverted=" + inverted + ", prior=" + prior, !t.err &&
+            JSON.stringify([W.kvs, W.schedules, W.relayConfigs]) === existing &&
+            prints.slice(errorLog).some(l => l.includes("Threshold-only mode") && l.includes("Schedule updates are paused")) &&
+            !prints.slice(errorLog).some(l => l.includes("using historical cheap hours")));
+        W.http = priceServer(h => h < 2 ? 0 : 100); t.loop(); t.flush();
+        check("S42 threshold-only pricing resumes, inverted=" + inverted + ", prior=" + prior, !t.err &&
+            W.schedules.length === 1 && specHours(W.schedules[0].timespec) === "0,1" && W.schedules[0].calls[0].params.on === !inverted);
+        W.http = priceServer(() => 100); t.stale(); t.loop(); t.flush();
+        check("S42 valid prices can still stop threshold-only heating, inverted=" + inverted + ", prior=" + prior, !t.err &&
+            W.schedules.length === 0 && JSON.parse(W.kvs.SmartHeatingSys1).ExistingSchedule === 0);
+    }
+}
+W = freshWorld(); W.http = () => [null, -114]; W.kvs.SmartHeatingConf1 = conf({ TimePeriod: 12, HeatingTime: 0, AlwaysOnPrice: -1 });
+W.kvs.SmartHeatingSys1 = JSON.stringify({ ExistingSchedule: 41, Version: 5 });
+W.schedules = [{ id: 41, enable: true, timespec: "0 0 1 * * *", calls: [{ method: "Switch.Set", params: { id: 0, on: true } }] }];
+t = boot(true); t.fcTm(); t.flush();
+check("S42 an explicit zero-hour timed fallback still removes prior heating", !t.err && W.schedules.length === 0 &&
+    W.deleted.includes(41) && JSON.parse(W.kvs.SmartHeatingSys1).ExistingSchedule === 0);
+
+// S43. Invalid backups need corrective action; transient failures only need a later read.
+for (const outcome of ["invalid", "failed"]) {
+    vcWorld(); W.kvs.SmartHeatingVC1 = "{";
+    if (outcome === "failed") W.fail["KVS.Get"] = p => p.key === "SmartHeatingVC1";
+    const remedyLog = prints.length; t = boot(true); t.fcTm(); t.flush();
+    const remedy = prints.slice(remedyLog).find(l => l.includes("Schedule updates are paused") && l.includes("SmartHeatingVC1")) || "";
+    check("S43 " + outcome + " backup gets an actionable state-specific remedy", !t.err && W.addAttempts.length === 0 &&
+        (outcome === "invalid" ? remedy.includes("valid backup JSON") && remedy.includes("all nine controls") && !remedy.includes("retry the read") :
+            remedy.includes("retry the read") && !remedy.includes("delete SmartHeatingVC1")), remedy);
+    if (outcome === "invalid") {
+        delete W.kvs.SmartHeatingVC1; //user intentionally resets after confirming all controls are absent
+        t.loop(); t.flush();
+        check("S43 intentional deletion of corrupt key allows a default reinstall when controls are absent", !t.err &&
+            W.schedules.length === 1 && completeGroup());
+    }
+}
+for (const app of [140, {}, ["Pro1"], null]) {
+    vcWorld(); W.device = { gen: 2, app, ver: "1.4.4" }; W.kvs.SmartHeatingConf1 = conf({ ManualKVS: false });
+    t = boot(true); t.fcTm(); t.flush();
+    check("S43 non-string app " + JSON.stringify(app) + " does not throw", !t.err && W.schedules.length === 1, String(t.err || ""));
+}
+
+// S44. Diagnostics must not assume successful installation from an RPC response or fallback attempt.
+vcWorld(); W.controlCreateResponse = null;
+t = boot(true); t.fcTm(); t.flush();
+check("S44 null control-add response is verified by the subsequent complete read", !t.err && completeGroup() &&
+    W.schedules.length === 1 && W.vcs.filter(v => v.key !== "group:200").length === 9);
+for (const empty of [false, true]) {
+    W = freshWorld(); W.http = () => [null, -114];
+    W.kvs.SmartHeatingConf1 = conf({ HeatingTime: empty ? 0 : 2, AlwaysOnPrice: -1 });
+    if (!empty) W.fail["Schedule.Create"] = true;
+    const fallbackLog = prints.length; t = boot(true); t.fcTm(); t.flush();
+    const logs = prints.slice(fallbackLog);
+    check("S44 " + (empty ? "empty" : "failed") + " fallback does not claim historical hours are active", !t.err &&
+        W.schedules.length === 0 && logs.some(l => /internet error/i.test(l) && /fallback/i.test(l) && /attempt|calculat/i.test(l)) &&
+        !logs.some(l => /using historical cheap hours/i.test(l)), logs);
+}
+
 console.log(failures === 0 ? "\nALL SPEC CHECKS PASSED" : "\n" + failures + " SPEC FAILURES");
 process.exit(failures === 0 ? 0 : 1);

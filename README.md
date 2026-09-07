@@ -463,6 +463,8 @@ For those interested in the mathematical aspect, the linear equation used to cal
 
 > This algorithm divides heating into distinct time periods, activating heating during the most cost-effective hours within each period. It is well-suited for use cases such as hot water boilers, where usage is contingent on the household size rather than external temperature. This method optimizes energy efficiency by aligning heating with periods of lower energy costs.
 
+Within each heating period, hours with equal calculated prices, including transmission fees, are selected latest first; always-on and always-off rules still apply.
+
 * A 24-hour graph with 10 heating hours visually shows when the most affordable times for heating are chosen during the day. The red bar represents heating hours within the day.
 
 <img src="images/Heating24_10.jpg" alt="Heating period 24h" width="750">

@@ -236,7 +236,7 @@ function cheapest(eveIso, tPer, hTim, priceFn) { // expected hour set, fee 0, th
     const nPer = Math.ceil(24 / tPer);
     for (let i = 0; i < nPer; i++) {
         const grp = hrs.filter(h => Math.floor(h / tPer) === i);
-        grp.sort((a, b) => priceFn(a) - priceFn(b));
+        grp.sort((a, b) => priceFn(a) - priceFn(b) || b - a);
         for (const h of grp.slice(0, hTim)) out.push(h);
     }
     return out.sort((a, b) => a - b).join(",");
@@ -1552,6 +1552,33 @@ for (const outcome of ["created", "failed", "empty"]) {
             JSON.parse(W.kvs.SmartHeatingSys1).ExistingSchedule === W.schedules[0].id);
     }
 }
+
+// S47. Equal ranked prices prefer later hours at the cutoff in each period.
+for (const fixture of [
+    { name: "flat", price: h => 0, expected: "10,11,22,23" },
+    { name: "cheap start", price: h => h % 12 < 4 ? 0 : 10, expected: "2,3,14,15" },
+    { name: "cheap end", price: h => h % 12 >= 8 ? 0 : 10, expected: "10,11,22,23" },
+]) {
+    FIXED_MS = new RealDate(EVE.normal).getTime();
+    W = freshWorld(); W.http = priceServer(fixture.price);
+    W.kvs.SmartHeatingConf1 = conf({ TimePeriod: 12, HeatingTime: 2, AlwaysOnPrice: -999 });
+    t = boot(); t.fcTm();
+    const actual = specHours(W.schedules[0]?.timespec);
+    const oracle = cheapest(EVE.normal, 12, 2, fixture.price);
+    check("S47 " + fixture.name + ": later tied hours win within each period", !t.err &&
+        W.schedules.length === 1 && actual === fixture.expected && oracle === fixture.expected,
+        { actual, oracle, expected: fixture.expected });
+}
+
+// All hours rank at 100 with VORK4: night 79 + 21, weekday day 63.1 + 36.9.
+// The last three hours win; 22 and 23 then exceed the market-price cutoff.
+// Preserve filtering AFTER selection: do not backfill with eligible earlier hours.
+W = freshWorld(); W.http = priceServer(h => h < 7 || h >= 22 ? 79 : 63.1);
+W.kvs.SmartHeatingConf1 = conf({ HeatingTime: 3, EnergyProvider: "VORK4",
+    AlwaysOnPrice: -999, AlwaysOffPrice: 75 });
+t = boot(); t.fcTm();
+check("S47 tariff tie retains market-price filtering after the cutoff without backfill", !t.err &&
+    W.schedules.length === 1 && specHours(W.schedules[0].timespec) === "21", W.schedules);
 
 console.log(failures === 0 ? "\nALL SPEC CHECKS PASSED" : "\n" + failures + " SPEC FAILURES");
 process.exit(failures === 0 ? 0 : 1);

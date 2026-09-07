@@ -449,6 +449,8 @@ Kui matemaatiline pool huvitab siis küttegraafuku lineaarvõrrand on järgmine:
 
 > See algoritm jagab päeva perioodideks, aktiveerides kütte kõige odavamatel tundidel igas perioodis. See sobib hästi kasutusjuhtudeks, nagu kuumavee boilerid, kus kasutus sõltub majapidamise suurusest ja mitte välistemperatuurist. See meetod optimeerib energiakasutust ning vesi püsib soe kõige madalamate elektri börsi hindadega.
 
+Igas kütteperioodis valitakse võrdse arvutatud hinnaga (koos võrgutasuga) tundidest esmalt hilisemad; alati sisse- ja väljalülitamise hinnareeglid kehtivad endiselt.
+
 * 24-tunnine graafik ja kuidas 10 kõige odavamat tundi valitakse, on näitena kujutatud järgmisel pildil. Punane tähistab kütmiseks kasutatavaid tunde.
 
 <img src="images/Heating24_10.jpg" alt="Kütteperiood 24 tundi" width="750">

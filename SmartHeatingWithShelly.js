@@ -1019,36 +1019,17 @@ function fMan() {
     fTmr(eler); //set the fail-safe timer before replacing the existing schedule
 }
 
-// Shelly doesnt support Javascript sort function so this basic math algorithm will do the sorting job
+// Insertion sort: ascending key, with later timestamps first when prices tie.
 function srAr(arr, sort) {
-    let i, j, k, min, max, minX, maxX, tmp;
-    j = arr.length - 1;
-    for (i = 0; i < j; i++) {
-        min = max = arr[i][sort];
-        minX = maxX = i;
-        for (k = i; k <= j; k++) {
-            if (arr[k][sort] > max) {
-                max = arr[k][sort];
-                maxX = k;
-            } else if (arr[k][sort] < min) {
-                min = arr[k][sort];
-                minX = k;
-            }
+    for (let i = 1; i < arr.length; i++) {
+        const item = arr[i];
+        let j = i - 1;
+        while (j >= 0 && (arr[j][sort] > item[sort] ||
+            (arr[j][sort] === item[sort] && arr[j][0] < item[0]))) {
+            arr[j + 1] = arr[j];
+            j--;
         }
-        tmp = arr[i];
-        arr[i] = arr[minX];
-        arr[minX] = tmp;
-
-        if (arr[minX][sort] === max) {
-            tmp = arr[j];
-            arr[j] = arr[minX];
-            arr[minX] = tmp;
-        } else {
-            tmp = arr[j];
-            arr[j] = arr[maxX];
-            arr[maxX] = tmp;
-        }
-        j--;
+        arr[j + 1] = item;
     }
     return arr;
 }

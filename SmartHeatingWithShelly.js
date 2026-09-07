@@ -1019,17 +1019,21 @@ function fMan() {
     fTmr(eler); //set the fail-safe timer before replacing the existing schedule
 }
 
-// Insertion sort: ascending key, with later timestamps first when prices tie.
+// Selection sort: ascending key, with later timestamps first when prices tie.
 function srAr(arr, sort) {
-    for (let i = 1; i < arr.length; i++) {
-        const item = arr[i];
-        let j = i - 1;
-        while (j >= 0 && (arr[j][sort] > item[sort] ||
-            (arr[j][sort] === item[sort] && arr[j][0] < item[0]))) {
-            arr[j + 1] = arr[j];
-            j--;
+    for (let i = 0; i < arr.length - 1; i++) {
+        let best = i;
+        for (let j = i + 1; j < arr.length; j++) {
+            if (arr[j][sort] < arr[best][sort] ||
+                (arr[j][sort] === arr[best][sort] && arr[j][0] > arr[best][0])) {
+                best = j;
+            }
         }
-        arr[j + 1] = item;
+        if (best !== i) {
+            const item = arr[i];
+            arr[i] = arr[best];
+            arr[best] = item;
+        }
     }
     return arr;
 }

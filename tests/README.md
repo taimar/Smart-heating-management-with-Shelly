@@ -24,11 +24,11 @@ The [Tests workflow](../.github/workflows/tests.yml) runs the spec followed by t
 | S55 | Initially disabled heating and watchdog scripts each receive an autostart enable command for the correct ID. The already enabled script is not rewritten. The stub records enabled state per script. |
 | S56 | Hand-written unequal-price tables anchor both production ranking and the oracle to literal hour lists: two hours in each six-hour period, and three hours on the autumn DST day. The DST comment identifies repeated 03:00 and explains why its second occurrence's lower price is ignored. |
 
-S48–S56 use a small synchronous scenario wrapper with a fresh world, clock, and logs. Test-side exceptions are reported as failures and the next scenario still runs; older top-level cases have not all been migrated to this wrapper. VM errors remain recorded for that boot instead of being cleared by the next driven call.
+S48–S56 use a small scenario wrapper with a fresh world, clock, and logs. Test-side exceptions are reported as failures and the next scenario still runs; older top-level cases have not all been migrated to this wrapper. VM errors remain recorded for that boot instead of being cleared by the next driven call.
 
 The queued harness supports `advanceBy(milliseconds)` and `advanceTo(epochMilliseconds)`. These process one-shot timers, repeating timers, and RPC callbacks in chronological order up to the bound, moving the script clock and device `unixtime` together. A device with `unixtime=0` remains unsynchronized until the scenario sets its time. Each advance is limited to 10,000 events. Randomness defaults to zero and can be set with `boot(true, { random: 0.5 })`.
 
-Existing `step()`/`flush()` cases still drive callbacks explicitly: they drain queued RPC and one-shot work without firing recurring timers. `jumpToNextDay()` simulates a device wall-clock correction before an explicit tick, expiring prices through the production update predicate. It replaces the old private timestamp mutation; S53 uses only boot and bounded time advancement.
+Every case uses queued RPC callbacks and one-shot timers. Bare `boot()` drains the queue automatically after `fcTm()` and `loop()`; `boot(true)` selects explicit stepping, leaving the case to call `step()`, `flush()`, or advance the clock. Automatic draining and `step()`/`flush()` process queued RPC and one-shot work without firing recurring timers; S53–S56 use bounded clock advancement. `jumpToNextDay()` simulates a device wall-clock correction before an explicit tick, expiring prices through the production update predicate. It replaces the old private timestamp mutation; S53 uses only boot and bounded time advancement.
 
 ## Targeted mutation checks
 
@@ -85,6 +85,6 @@ Keep the sentinel phrases `Schedule updates are paused`, `Missing controls`, and
 
 ## Limits
 
-Node does not establish Shelly engine compatibility, actual cron execution, or device memory usage. Measure `mem_used` and `mem_peak` on hardware before release. Most scenarios use synchronous callbacks; queued cases cover the critical asynchronous paths and RPC/timer limits.
+Node does not establish Shelly engine compatibility, actual cron execution, or device memory usage. Measure `mem_used` and `mem_peak` on hardware before release.
 
 Schedule persistence remains an in-memory retry, not a transaction journal. A restart before a successful SystemData write may leave an unrecorded schedule. The script does not discover or recover orphan schedules, and it skips schedule listing when no ID is recorded. After a failed polarity transition, the previous schedule may remain disabled until a successful retry.

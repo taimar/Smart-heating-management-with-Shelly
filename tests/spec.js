@@ -149,7 +149,10 @@ const Shelly = {
 };
 // Each candidate runs in its own VM context. A hung parser or loop becomes a
 // scenario failure instead of stopping the rest of the suite.
-function boot(queued, options = {}) {
+// RPC callbacks and one-shot timers always run through the queue. Bare boot()
+// drains it after fcTm()/loop(); explicitStepping leaves draining to the case.
+function boot(explicitStepping, options = {}) {
+    const autoDrain = !explicitStepping;
     const world = W, queue = [], timers = new Map();
     let now = 0, nextTimer = 0, rpcCount = 0, rpcPeak = 0, timerPeak = 0;
     const asyncShelly = Object.assign({}, Shelly, { call: (m, p, cb, ud) => {
@@ -167,10 +170,7 @@ function boot(queued, options = {}) {
                 cb(data);
             } };
             timers.set(id, event); timerPeak = Math.max(timerPeak, timers.size);
-            if (!rep) {
-                if (queued) queue.push(event);
-                else event.run(); // Retain synchronous callbacks for legacy cases.
-            }
+            if (!rep) queue.push(event);
             return id;
         },
         clear: id => {
@@ -181,7 +181,7 @@ function boot(queued, options = {}) {
     };
     const fakeMath = Object.create(Math);
     fakeMath.random = () => options.random ?? 0;
-    const ctx = vm.createContext({ Shelly: queued ? asyncShelly : Shelly,
+    const ctx = vm.createContext({ Shelly: asyncShelly,
         Timer: fakeTimer, Math: fakeMath, print, atob, Date, console: { log: print } });
     const t = {
         err: null,
@@ -248,8 +248,8 @@ function boot(queued, options = {}) {
     };
     t.pending = () => queue.map(e => e.method || "timer");
     t.drive(SRC);
-    t.fcTm = () => t.drive("fcTm()");
-    t.loop = () => t.drive("loop()");
+    t.fcTm = () => { const r = t.drive("fcTm()"); if (autoDrain) t.flush(); return r; };
+    t.loop = () => { const r = t.drive("loop()"); if (autoDrain) t.flush(); return r; };
     t.verC = (oldV, newV) => t.drive("verC(" + JSON.stringify(oldV) + "," + JSON.stringify(newV) + ")");
     return t;
 }

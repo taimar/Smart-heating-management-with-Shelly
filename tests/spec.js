@@ -31,7 +31,7 @@ let W;
 function freshWorld() {
     return {
         kvs: {}, schedules: [], deleted: [], nextId: 5, nextScriptId: 9, calls: [],
-        scripts: [{ id: 3, name: "watchdog" }], running: { 3: true },
+        scripts: [{ id: 3, name: "watchdog" }], running: { 3: true }, scriptEnabled: {},
         vcs: [], vDeleted: [], http: null, fail: {}, lastUrl: null,
         putCode: 0, ignoreKeys: false, relayConfigs: [], kvsWrites: [], addAttempts: [],
         device: { gen: 2, app: "Plus1PM", ver: "1.4.4" },
@@ -48,9 +48,10 @@ const Shelly = {
     getComponentConfig: (n, id) => {
         if (n === "sys") return W.sysConfig;
         if (n === "switch") return W.relayConfig;
+        if (n === "script" && id === 1) return { enable: W.scriptEnabled[id] ?? true };
         if (n === "script" && id !== 1) {
             const script = W.scripts.find(s => s.id === id);
-            return script ? { name: script.name, enable: true } : null;
+            return script ? { name: script.name, enable: W.scriptEnabled[id] ?? true } : null;
         }
         return { enable: true };
     },
@@ -93,7 +94,10 @@ const Shelly = {
             case "Script.Create": { const id = W.nextScriptId++; W.scripts.push({ id, name: p.name }); W.running[id] = false; return done({ id }, 0); }
             case "Script.Stop": W.running[p.id] = false; return done({}, 0);
             case "Script.Start": W.running[p.id] = true; return done({}, 0);
-            case "Script.SetConfig": return done({ id: p.id }, 0);
+            case "Script.SetConfig": {
+                if ("enable" in p.config) W.scriptEnabled[p.id] = p.config.enable;
+                return done({ id: p.id }, 0);
+            }
             case "Script.PutCode": W.wdCode = p.code; W.putCode++; return done({ id: p.id }, 0);
             case "Shelly.GetComponents": {
                 // models a keys-capable, PAGINATED firmware: filters by p.keys, pages by p.offset
@@ -895,7 +899,13 @@ const preservedId = W.schedules[0].id;
 W.fail["Switch.SetConfig"] = true; W.relayConfig = null;
 const diagnosticStart = prints.length;
 t.jumpToNextDay(); t.loop();
-check("S16 local error identifies the recorded schedule being preserved", W.schedules[0].id === preservedId && prints.slice(diagnosticStart).some(line => line.includes("Keeping recorded schedule ID " + preservedId + ".")));
+const preservationLogs = prints.slice(diagnosticStart);
+const scheduleReference = new RegExp("\\bschedule\\s+(?:id\\s*[:#]?\\s*|#\\s*)?" + preservedId + "\\b", "i");
+check("S16 local error identifies the recorded schedule being preserved", !t.err &&
+    W.schedules.length === 1 && W.schedules[0].id === preservedId &&
+    preservationLogs.some(line => line.includes("Schedule updates are paused")) &&
+    preservationLogs.some(line => scheduleReference.test(line)) &&
+    preservationLogs.some(line => line.includes("forced failure")), preservationLogs);
 
 // S17. Queued interrupted installation, explicit reset, and later pause respect RPC/timer limits.
 vcWorld(); W.pageSize = 3; W.ignoreKeys = true; W.vcs = manyForeign(5);
@@ -1882,6 +1892,98 @@ scenario("S53 missing device time waits thirty seconds, falls back, then synchro
     runtime.advanceBy(1000);
     expectSchedule(runtime, cheapest(EVE.normal, 24, 10, PRICE));
     assert.equal(W.calls.filter(c => c.method === "HTTP.GET").length, 1, "next time-check callback resumes online heating");
+});
+
+// S54. Requests are the script's external contract. Keep the response fixtures
+// unchanged, but assert the emitted service, path and relevant query arguments.
+for (const country of ["ee", "fi", "lv", "lt"]) {
+    scenario("S54 price request uses configured country " + country, () => {
+        W.kvs.SmartHeatingConf1 = conf({ Country: country });
+        W.http = priceServer(PRICE);
+        const runtime = boot(true); runtime.advanceBy(1500);
+        expectSchedule(runtime, cheapest(EVE.normal, 24, 10, PRICE));
+        const requests = W.calls.filter(c => c.method === "HTTP.GET");
+        assert.equal(requests.length, 1, "one market-price request");
+        const url = new URL(requests[0].params.url);
+        assert.equal(url.origin, "https://dashboard.elering.ee", "price service");
+        assert.equal(url.pathname, "/api/nps/price/csv", "price endpoint");
+        assert.deepEqual(url.searchParams.getAll("fields"), [country], "configured market field");
+    });
+}
+for (const fixture of [
+    { period: 6, lat: 59.44, lon: 24.75 },
+    { period: 12, lat: 60.17, lon: 24.94 },
+    { period: 24, lat: 56.95, lon: 24.11 },
+]) {
+    scenario("S54 forecast request uses configured coordinates and " + fixture.period + " hours", () => {
+        W.sysConfig.location = { lat: fixture.lat, lon: fixture.lon };
+        W.kvs.SmartHeatingConf1 = conf({ TimePeriod: fixture.period, HeatingTime: 0,
+            IsForecastUsed: true, AlwaysOnPrice: -999 });
+        W.http = p => p.url.includes("open-meteo")
+            ? [{ code: 200, body: JSON.stringify({ hourly: { apparent_temperature: [20, 20] } }) }, 0]
+            : priceServer(PRICE)(p);
+        const runtime = boot(true); runtime.advanceBy(1500);
+        expectSchedule(runtime, null);
+        const requests = W.calls.filter(c => c.method === "HTTP.GET");
+        assert.equal(requests.length, 2, "forecast followed by market prices");
+        const url = new URL(requests[0].params.url);
+        assert.equal(url.origin, "https://api.open-meteo.com", "forecast service");
+        assert.equal(url.pathname, "/v1/forecast", "forecast endpoint");
+        assert.deepEqual(url.searchParams.getAll("latitude"), [String(fixture.lat)], "device latitude");
+        assert.deepEqual(url.searchParams.getAll("longitude"), [String(fixture.lon)], "device longitude");
+        assert.deepEqual(url.searchParams.getAll("forecast_hours"), [String(fixture.period)], "configured forecast horizon");
+        assert.deepEqual(url.searchParams.getAll("hourly"), ["apparent_temperature"], "temperature measure");
+    });
+}
+
+// S55. Each disabled script needs an enable command for its own ID.
+for (const [id, name] of [[1, "heating"], [3, "watchdog"]]) {
+    scenario("S55 enables autostart for the disabled " + name + " script", () => {
+        W.scriptEnabled = { 1: true, 3: true };
+        W.scriptEnabled[id] = false;
+        W.kvs.SmartHeatingConf1 = conf(); W.http = priceServer(PRICE);
+        const runtime = boot(true); runtime.advanceBy(1500);
+        expectSchedule(runtime, cheapest(EVE.normal, 24, 10, PRICE));
+        const writes = W.calls.filter(c => c.method === "Script.SetConfig").map(c => c.params);
+        assert.deepEqual(JSON.parse(JSON.stringify(writes)), [{ id, config: { enable: true } }],
+            "enable the disabled script without rewriting the enabled script");
+        assert.equal(W.scriptEnabled[id], true, "autostart setting is saved");
+    });
+}
+
+// S56. Literal anchors for production ranking and the independent oracle.
+scenario("S56 unequal prices select two hours in each six-hour period", () => {
+    const prices = [
+        90, 40, 10, 70, 20, 60,     // 00–05: hours 02 and 04 cost 10 and 20.
+        15, 80, 35, 5, 65, 45,      // 06–11: hours 09 and 06 cost 5 and 15.
+        55, 25, 95, 75, 85, 30,     // 12–17: hours 13 and 17 cost 25 and 30.
+        100, 50, 110, 120, 130, 115, // 18–23: hours 19 and 18 cost 50 and 100.
+    ];
+    const expected = "2,4,6,9,13,17,18,19";
+    W.kvs.SmartHeatingConf1 = conf({ TimePeriod: 6, HeatingTime: 2, AlwaysOnPrice: -999 });
+    W.http = priceServer(h => prices[h]);
+    const runtime = boot(true); runtime.advanceBy(1500);
+    expectSchedule(runtime, expected);
+    assert.equal(cheapest(EVE.normal, 6, 2, h => prices[h]), expected, "oracle agrees with hand-ranked periods");
+});
+scenario("S56 autumn ranking uses the first occurrence of the repeated local hour", () => {
+    FIXED_MS = new RealDate(EVE.autumn).getTime(); W = freshWorld();
+    const firstPrices = [
+        40, 60, 50, 70, 10, 20, 80, 90, 100, 110, 120, 130,
+        140, 150, 160, 170, 180, 190, 200, 210, 220, 230, 240, 250,
+    ];
+    // Tallinn's 25-hour day repeats 03:00: first at +03:00, then at +02:00.
+    // Cron has one 03 label and uses its first price (70). The second price (1)
+    // must not enter ranking. The three cheapest schedulable hours are therefore
+    // 04 (10), 05 (20), and 00 (40); 03 is excluded despite its cheap second occurrence.
+    const secondThree = RealDate.parse("2026-10-25T03:00:00+02:00");
+    const expected = "0,4,5";
+    W.kvs.SmartHeatingConf1 = conf({ HeatingTime: 3, AlwaysOnPrice: -999 });
+    W.http = priceServer((h, instant) => h === 3 && instant >= secondThree ? 1 : firstPrices[h]);
+    const runtime = boot(true); runtime.advanceBy(1500);
+    expectSchedule(runtime, expected);
+    assert.equal(cheapest(EVE.autumn, 24, 3, h => firstPrices[h]), expected,
+        "oracle agrees with the literal ranking of schedulable local hours");
 });
 
 console.log(failures === 0 ? "\nALL SPEC CHECKS PASSED" : "\n" + failures + " SPEC FAILURES");

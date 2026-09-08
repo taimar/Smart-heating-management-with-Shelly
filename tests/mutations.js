@@ -36,6 +36,12 @@ const mutations = [
     ['one-shot-periodic-timer', 'S53', 'Timer.set(_.freq * 1000, true, loop);', 'Timer.set(_.freq * 1000, false, loop);'],
     ['one-shot-time-check', 'S53', 'Timer.set(1000, true, fcTm)', 'Timer.set(1000, false, fcTm)'],
     ['ignore-update-minute', 'S53', 'updD: Math.floor(Math.random() * 46)', 'updD: 0'],
+    ['wrong-price-country', 'S54', 'url += c.cnty + "&start="', 'url += "ee" + "&start="'],
+    ['wrong-forecast-horizon', 'S54', 'url = url + c.tPer + "&latitude="', 'url = url + 1 + "&latitude="'],
+    ['swapped-forecast-coordinates', 'S54', 'loc.lat + "&longitude=" + loc.lon', 'loc.lon + "&longitude=" + loc.lat'],
+    ['heating-autostart-disabled', 'S55', 'id: _.sId, config: { enable: true }', 'id: _.sId, config: { enable: false }'],
+    ['watchdog-autostart-disabled', 'S55', 'id: sId, config: { enable: true }', 'id: sId, config: { enable: false }'],
+    ['watchdog-autostart-wrong-script', 'S55', 'id: sId, config: { enable: true }', 'id: 1, config: { enable: true }'],
     ['no-winter-peaks', 'S51', 'mnth >= 10 || mnth <= 2', 'false', 2, 'all'],
     ['exclude-march-peaks', 'S51', 'mnth >= 10 || mnth <= 2', 'mnth >= 10 || mnth < 2', 2, 'all'],
     ['exclude-november-peaks', 'S51', 'mnth >= 10 || mnth <= 2', 'mnth > 10 || mnth <= 2', 2, 'all'],
@@ -59,10 +65,13 @@ function run(file) {
         maxBuffer: 4 * 1024 * 1024,
     });
 }
+class StalePatternError extends Error {}
+
 function mutate([name, , from, to, count = 1, occurrence = 0]) {
     const parts = source.split(from);
     if (parts.length - 1 !== count) {
-        throw new Error(name + ': expected ' + count + ' source matches, found ' + (parts.length - 1));
+        throw new StalePatternError('expected=' + count + ' actual=' + (parts.length - 1) +
+            ' pattern=' + JSON.stringify(from));
     }
     let result = parts[0];
     for (let i = 0; i < count; i++) result += (occurrence === 'all' || occurrence === i ? to : from) + parts[i + 1];
@@ -81,26 +90,32 @@ let unresolved = 0;
 try {
     for (const mutation of mutations) {
         const [name, intended] = mutation;
-        const file = path.join(dir, name + '.js');
-        fs.writeFileSync(file, mutate(mutation));
-        const result = run(file);
-        const failures = result.stdout.split('\n').filter(line => line.startsWith('FAIL '));
-        const detectors = [...new Set(failures.map(line => line.split(' ')[1]))];
-        const intendedAssertion = failures.some(line => line.startsWith('FAIL ' + intended + ' ') &&
-            line.includes('"kind":"AssertionError"'));
-        let status;
-        if (result.error || result.signal || result.stderr || (!/SPEC FAILURES\s*$/.test(result.stdout) && result.status !== 0)) {
-            status = 'ERROR';
-        } else if (result.status === 0) {
-            status = 'SURVIVED';
-        } else if (intendedAssertion) {
-            status = 'KILLED';
-        } else {
-            status = 'REVIEW';
+        try {
+            const file = path.join(dir, name + '.js');
+            fs.writeFileSync(file, mutate(mutation));
+            const result = run(file);
+            const failures = result.stdout.split('\n').filter(line => line.startsWith('FAIL '));
+            const detectors = [...new Set(failures.map(line => line.split(' ')[1]))];
+            const intendedAssertion = failures.some(line => line.startsWith('FAIL ' + intended + ' ') &&
+                line.includes('"kind":"AssertionError"'));
+            let status;
+            if (result.error || result.signal || result.stderr || (!/SPEC FAILURES\s*$/.test(result.stdout) && result.status !== 0)) {
+                status = 'ERROR';
+            } else if (result.status === 0) {
+                status = 'SURVIVED';
+            } else if (intendedAssertion) {
+                status = 'KILLED';
+            } else {
+                status = 'REVIEW';
+            }
+            if (status !== 'KILLED') unresolved++;
+            console.log(status + ' ' + name + ' intended=' + intended + ' detected=' + (detectors.join(',') || 'none'));
+            if (status === 'ERROR') console.log(result.error?.message || result.stderr || result.stdout.slice(-1000));
+        } catch (error) {
+            unresolved++;
+            console.log((error instanceof StalePatternError ? 'STALE' : 'ERROR') + ' ' + name +
+                ' intended=' + intended + ' -- ' + error.message);
         }
-        if (status !== 'KILLED') unresolved++;
-        console.log(status + ' ' + name + ' intended=' + intended + ' detected=' + (detectors.join(',') || 'none'));
-        if (status === 'ERROR') console.log(result.error?.message || result.stderr || result.stdout.slice(-1000));
     }
 } finally {
     fs.rmSync(dir, { recursive: true, force: true });

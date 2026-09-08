@@ -1,8 +1,9 @@
-// Implementation-agnostic requirement suite for SmartHeatingWithShelly.js.
-// Asserts WHAT the script must do, never HOW. Safe for TDD and merge gating.
+// Requirement suite for SmartHeatingWithShelly.js using simulated device RPCs.
+// Legacy cases drive callbacks explicitly; S53 exercises registered timers.
 // Run: TZ=Europe/Tallinn node tests/spec.js <path-to-script>
 const fs = require("fs");
 const vm = require("vm");
+const assert = require("assert/strict");
 const SRC = fs.readFileSync(process.argv[2], "utf8");
 
 const RealDate = global.Date;
@@ -13,8 +14,8 @@ const EVE = { // fetch instants: the evening before the target day, 23:30 local
 };
 let FIXED_MS = new RealDate(EVE.normal).getTime();
 class Date extends RealDate {
-    constructor(...a) { a.length === 0 ? super(FIXED_MS) : super(...a); }
-    static now() { return FIXED_MS; }
+    constructor(...a) { a.length === 0 ? super(W ? W.now : FIXED_MS) : super(...a); }
+    static now() { return W ? W.now : FIXED_MS; }
     setHours(...a) {
         if (W && W.noDateMutation) throw new Error("Date.setHours unavailable");
         return super.setHours(...a);
@@ -35,13 +36,12 @@ function freshWorld() {
         putCode: 0, ignoreKeys: false, relayConfigs: [], kvsWrites: [], addAttempts: [],
         device: { gen: 2, app: "Plus1PM", ver: "1.4.4" },
         sysConfig: { location: { lat: 59.44, lon: 24.75 } },
-        unixtime: FIXED_MS / 1000,
+        now: FIXED_MS, unixtime: FIXED_MS / 1000,
     };
 }
 const prints = [];
 function print(...a) { prints.push(a.join(" ")); }
 function atob(b) { return Buffer.from(b, "base64").toString("latin1"); }
-const Timer = { set: (ms, rep, cb, d) => { if (!rep) cb(d); return 1; }, clear: () => { } };
 const Shelly = {
     getCurrentScriptId: () => 1,
     getDeviceInfo: () => W.device,
@@ -145,56 +145,107 @@ const Shelly = {
 };
 // Each candidate runs in its own VM context. A hung parser or loop becomes a
 // scenario failure instead of stopping the rest of the suite.
-function boot(queued) {
-    const queue = [], timers = new Set();
+function boot(queued, options = {}) {
+    const world = W, queue = [], timers = new Map();
     let now = 0, nextTimer = 0, rpcCount = 0, rpcPeak = 0, timerPeak = 0;
     const asyncShelly = Object.assign({}, Shelly, { call: (m, p, cb, ud) => {
         rpcCount++; rpcPeak = Math.max(rpcPeak, rpcCount);
         queue.push({ method: m, at: now + 10, run: () => { rpcCount--; Shelly.call(m, p, cb, ud); } });
     } });
-    const asyncTimer = {
+    const fakeTimer = {
         set: (ms, rep, cb, data) => {
             const id = ++nextTimer;
-            timers.add(id); timerPeak = Math.max(timerPeak, timers.size);
-            if (!rep) queue.push({ at: now + ms, run: () => {
-                if (timers.delete(id)) cb(data);
-            } });
+            if (rep && ms <= 0) throw new Error("Repeating timer needs a positive interval");
+            const event = { id, at: now + ms, rep, run: () => {
+                if (!timers.has(id)) return;
+                if (rep) event.at = now + ms;
+                else timers.delete(id);
+                cb(data);
+            } };
+            timers.set(id, event); timerPeak = Math.max(timerPeak, timers.size);
+            if (!rep) {
+                if (queued) queue.push(event);
+                else event.run(); // Retain synchronous callbacks for legacy cases.
+            }
             return id;
         },
-        clear: id => timers.delete(id),
+        clear: id => {
+            timers.delete(id);
+            const index = queue.findIndex(event => event.id === id);
+            if (index !== -1) queue.splice(index, 1);
+        },
     };
-    const ctx = vm.createContext({ Shelly: queued ? asyncShelly : Shelly, Timer: queued ? asyncTimer : Timer, print, atob, Date, console: { log: print } });
+    const fakeMath = Object.create(Math);
+    fakeMath.random = () => options.random ?? 0;
+    const ctx = vm.createContext({ Shelly: queued ? asyncShelly : Shelly,
+        Timer: fakeTimer, Math: fakeMath, print, atob, Date, console: { log: print } });
     const t = {
         err: null,
-        drive: (code) => {
-            t.err = null;
+        drive: code => {
+            if (t.err) return;
             try { return vm.runInContext(code, ctx, { timeout: 3000 }); }
             catch (e) { t.err = e; return undefined; }
         },
     };
+    function moveTo(target) {
+        const delta = target - now;
+        world.now += delta;
+        // A device awaiting time synchronization continues to report no time.
+        if (world.unixtime > 0) world.unixtime = world.now / 1000;
+        now = target;
+    }
+    function nextEvent(includeRepeating) {
+        queue.sort((a, b) => a.at - b.at);
+        let event = queue[0];
+        if (includeRepeating) {
+            for (const timer of timers.values()) {
+                if (timer.rep && (!event || timer.at < event.at)) event = timer;
+            }
+        }
+        return event;
+    }
+    function runEvent(event) {
+        const index = queue.indexOf(event);
+        if (index !== -1) queue.splice(index, 1);
+        moveTo(Math.max(now, event.at));
+        ctx.runCallback = event.run;
+        t.drive("runCallback()");
+    }
+    // Explicit-step cases drain work already requested. They do not fire the
+    // recurring clock: advanceBy/advanceTo are the timer-driven entry points.
     t.flush = () => {
         let steps = 0;
-        while (queue.length && !t.err && steps++ < 500) {
-            queue.sort((a, b) => a.at - b.at);
-            const event = queue.shift(); now = event.at;
-            ctx.runCallback = event.run;
-            t.drive("runCallback()");
-        }
+        while (queue.length && !t.err && steps++ < 500) runEvent(nextEvent(false));
         if (queue.length && !t.err) t.err = new Error("Asynchronous work did not settle");
         return { rpcPeak, timerPeak };
     };
-    t.step = () => {
-        if (!queue.length || t.err) return;
-        queue.sort((a, b) => a.at - b.at);
-        const event = queue.shift(); now = event.at;
-        ctx.runCallback = event.run;
-        t.drive("runCallback()");
+    t.step = () => { if (queue.length && !t.err) runEvent(nextEvent(false)); };
+    t.advanceBy = duration => {
+        assert.ok(Number.isFinite(duration) && duration >= 0, "nonnegative finite duration");
+        const target = now + duration;
+        let event, steps = 0;
+        while (!t.err && (event = nextEvent(true)) && event.at <= target) {
+            if (++steps > 10000) { t.err = new Error("Clock advancement exceeded event limit"); break; }
+            runEvent(event);
+        }
+        if (!t.err) moveTo(target);
+        return { rpcPeak, timerPeak };
+    };
+    t.advanceTo = instant => t.advanceBy(instant - world.now);
+    // Model a device wall-clock correction in legacy cases that explicitly
+    // invoke a tick. This expires prices through the real update predicate,
+    // without touching private script state or firing intervening timers.
+    t.jumpToNextDay = () => {
+        const next = new RealDate(world.now);
+        next.setDate(next.getDate() + 1);
+        next.setHours(23, 59, 0, 0);
+        world.now = next.getTime();
+        world.unixtime = world.now / 1000;
     };
     t.pending = () => queue.map(e => e.method || "timer");
     t.drive(SRC);
     t.fcTm = () => t.drive("fcTm()");
     t.loop = () => t.drive("loop()");
-    t.stale = () => t.drive("_.tsPr = 0");
     t.verC = (oldV, newV) => t.drive("verC(" + JSON.stringify(oldV) + "," + JSON.stringify(newV) + ")");
     return t;
 }
@@ -254,6 +305,37 @@ let failures = 0;
 function check(name, cond, detail) {
     if (cond) console.log("PASS", name);
     else { failures++; console.log("FAIL", name, "--", detail === undefined ? "" : JSON.stringify(detail)); }
+}
+
+// New scenarios own their clock, world and logs. A test-side exception reports
+// one failure and does not prevent the remaining scenarios from running.
+function scenario(name, run) {
+    const previousTime = FIXED_MS, previousWorld = W;
+    FIXED_MS = new RealDate(EVE.normal).getTime();
+    W = freshWorld();
+    prints.length = 0;
+    try {
+        run();
+        check(name, true);
+    } catch (error) {
+        check(name, false, { kind: error?.operator === "ifError" ? "RuntimeError" : error?.name || "ThrownValue",
+            message: error?.message || String(error) });
+    } finally {
+        FIXED_MS = previousTime;
+        W = previousWorld;
+    }
+}
+
+function expectSchedule(runtime, hours, options = {}) {
+    assert.ifError(runtime.err);
+    assert.equal(W.schedules.length, hours === null ? 0 : 1, "schedule count");
+    if (hours === null) return;
+    const job = W.schedules[0];
+    assert.equal(job.timespec, "0 0 " + hours + " * * *", "complete daily cron expression");
+    assert.equal(job.enable, true, "schedule enabled");
+    assert.deepEqual(JSON.parse(JSON.stringify(job.calls)), [{
+        method: "Switch.Set", params: { id: options.relayId ?? 0, on: !options.inverted },
+    }], "scheduled relay command");
 }
 
 // =====================================================================
@@ -380,7 +462,7 @@ function recovers(name, breakFn, healFn, stale) {
     if (stale) {
         W.http = priceServer(PRICE2);
         exp = cheapest(EVE.normal, 24, 10, PRICE2);
-        t.stale();
+        t.jumpToNextDay();
     }
     if (!crashed) t.loop(); // the regular 5-minute tick
     const got = W.schedules.length ? specHours(W.schedules[W.schedules.length - 1].timespec) : null;
@@ -505,7 +587,7 @@ function preservesSchedule(name, method) {
     const oldId = W.schedules[0].id;
     W.fail[method] = true;
     if (method === "Switch.SetConfig") W.relayConfig = null; // an existing timer cannot be verified
-    t.stale();
+    t.jumpToNextDay();
     t.loop();
     const preserved = W.schedules.length === 1 && W.schedules[0].id === oldId && W.deleted.indexOf(oldId) === -1;
     delete W.fail[method];
@@ -683,11 +765,11 @@ W.kvs["SmartHeatingConf1"] = conf();
 W.http = priceServer(PRICE);
 t = boot();
 t.fcTm();
-t.stale();
+t.jumpToNextDay();
 t.loop();
 const noRewriteWhileRunning = W.putCode === 1;
 W.running[3] = false;
-t.stale();
+t.jumpToNextDay();
 t.loop();
 check("S13 watchdog is written once and restarted without a rewrite", noRewriteWhileRunning && W.putCode === 1 && W.running[3] === true,
     [W.putCode, W.running]);
@@ -812,7 +894,7 @@ t = boot(); t.fcTm();
 const preservedId = W.schedules[0].id;
 W.fail["Switch.SetConfig"] = true; W.relayConfig = null;
 const diagnosticStart = prints.length;
-t.stale(); t.loop();
+t.jumpToNextDay(); t.loop();
 check("S16 local error identifies the recorded schedule being preserved", W.schedules[0].id === preservedId && prints.slice(diagnosticStart).some(line => line.includes("Keeping recorded schedule ID " + preservedId + ".")));
 
 // S17. Queued interrupted installation, explicit reset, and later pause respect RPC/timer limits.
@@ -824,10 +906,10 @@ const stoppedControls = JSON.stringify(W.vcs), stoppedAdds = W.addAttempts.lengt
 delete W.fail["Virtual.Add"]; t.loop(); const pauseLimits = t.flush();
 const partialPaused = !t.err && JSON.stringify(W.vcs) === stoppedControls && W.addAttempts.length === stoppedAdds;
 W.vcs = manyForeign(5); // user explicitly clears all required control slots to reinstall
-t.stale(); t.loop(); const retryLimits = t.flush();
+t.jumpToNextDay(); t.loop(); const retryLimits = t.flush();
 const installedAsync = !t.err && W.vcs.length === 15 && W.schedules.length === 1;
 W.vcs.find(v => v.key === "boolean:201").status.value = true;
-t.stale(); t.loop(); t.flush();
+t.jumpToNextDay(); t.loop(); t.flush();
 W.vcs = W.vcs.filter(v => v.key !== "boolean:201");
 t = boot(true); t.fcTm();
 const limits = t.flush();
@@ -868,7 +950,7 @@ for (const saved of ["invalid JSON", "null", "{}", "[]"]) {
 for (const period of [0, "0", 6, "6", 12, "12", 24, "24"]) {
     W = freshWorld(); W.http = priceServer(PRICE);
     const saved = conf({ TimePeriod: period, HeatingTime: 2 }); W.kvs.SmartHeatingConf1 = saved;
-    t = boot(); t.fcTm(); t.stale(); t.loop();
+    t = boot(); t.fcTm(); t.jumpToNextDay(); t.loop();
     const expected = Number(period) === 0 ? null : cheapest(EVE.normal, Number(period), 2, PRICE);
     check("S18 supported period " + JSON.stringify(period) + " is used without rewriting KVS",
         !t.err && W.kvs.SmartHeatingConf1 === saved && !W.kvsWrites.includes("SmartHeatingConf1") &&
@@ -892,7 +974,7 @@ for (const virtual of [false, true]) {
         W.kvs.SmartHeatingConf1 = changed;
         W.fail["KVS.Get"] = p => p.key === "SmartHeatingConf1";
         const before = JSON.stringify([W.kvs, W.schedules, W.vcs, W.relayConfigs]);
-        t.stale(); t.fcTm(); t.flush();
+        t.jumpToNextDay(); t.fcTm(); t.flush();
         const firstError = t.err;
         t.loop(); t.flush();
         check("S19 failed read on " + (virtual ? "VC-capable" : "KVS-only") + " device " + (priorSuccess ? "after success" : "at boot") + " changes nothing",
@@ -905,7 +987,7 @@ for (const virtual of [false, true]) {
     }
 }
 W = freshWorld(); W.http = priceServer(PRICE);
-t = boot(); t.fcTm(); t.stale(); t.loop();
+t = boot(); t.fcTm(); t.jumpToNextDay(); t.loop();
 check("S19 confirmed missing KVS config initializes once", !t.err && W.schedules.length === 1 && W.kvsWrites.filter(k => k === "SmartHeatingConf1").length === 1);
 
 // S20. Reject complete foreign sets and a single conflicting control before applying values.
@@ -963,7 +1045,7 @@ for (const change of ["renamed running", "renamed stopped", "reused ID", "delete
     if (change === "replacement watchdog") { W.scripts.push({ id: 4, name: "watchdog" }); W.running[4] = false; }
     W.running[3] = change === "renamed running";
     const beforeRunning = W.running[3], start = W.calls.length;
-    t.stale(); t.loop(); t.flush();
+    t.jumpToNextDay(); t.loop(); t.flush();
     const foreignWrites = W.calls.slice(start).filter(c => ["Script.Start", "Script.Stop", "Script.PutCode", "Script.SetConfig"].includes(c.method) && c.params.id === 3);
     const actual = W.scripts.find(s => s.name === "watchdog");
     check("S22 " + change + ": foreign ID left alone, actual watchdog runs",
@@ -979,7 +1061,7 @@ for (const priorRecord of [false, true]) {
         if (priorRecord) { t.fcTm(); t.flush(); }
         W.kvs.SmartHeatingConf1 = conf({ HeatingTime: noHeating ? 0 : 2 });
         W.fail["KVS.set"] = p => p.key === "SmartHeatingSys1";
-        t.stale(); t.fcTm(); t.flush();
+        t.jumpToNextDay(); t.fcTm(); t.flush();
         const initialError = t.err;
         const expectedJobs = JSON.stringify(W.schedules);
         const unsavedId = W.schedules.length ? W.schedules[0].id : 0;
@@ -987,7 +1069,7 @@ for (const priorRecord of [false, true]) {
         const start = W.calls.length;
         // Changes made while persistence is pending must wait, preserving the pending ID.
         W.kvs.SmartHeatingConf1 = conf({ HeatingTime: 3 });
-        for (let i = 0; i < 3; i++) { t.stale(); t.loop(); t.flush(); }
+        for (let i = 0; i < 3; i++) { t.jumpToNextDay(); t.loop(); t.flush(); }
         const retries = W.calls.slice(start);
         const writes = retries.filter(c => c.method === "KVS.set" && c.params.key === "SmartHeatingSys1");
         check("S23 " + (priorRecord ? "stale" : "missing") + " record, " + (noHeating ? "zero" : "new") + " ID retries once per cycle without other work",
@@ -1019,7 +1101,7 @@ for (const inverted of [false, true]) {
         W.kvs.SmartHeatingConf1 = conf({ InvertedRelay: !inverted });
         if (failStep) W.fail[failStep] = true;
         const start = W.calls.length;
-        t.stale(); t.loop();
+        t.jumpToNextDay(); t.loop();
         const limits = t.flush();
         const beforeDisable = failStep === "Schedule.List" || failStep === "Schedule.Update";
         const active = W.schedules.filter(s => s.enable);
@@ -1047,7 +1129,7 @@ for (const inverted of [false, true]) {
 W = freshWorld(); W.kvs.SmartHeatingConf1 = conf(); W.http = priceServer(PRICE);
 t = boot(true); t.fcTm(); t.flush();
 W.kvs.SmartHeatingConf1 = conf({ InvertedRelay: true }); W.fail["Schedule.Delete"] = true;
-t.stale(); t.loop(); t.flush();
+t.jumpToNextDay(); t.loop(); t.flush();
 const disabledId = W.schedules[0].id;
 t = boot(true); t.fcTm(); t.flush();
 check("S24 disabled schedule remains disabled across restart and another deletion failure", !t.err && W.schedules.length === 1 && W.schedules[0].id === disabledId && W.schedules[0].enable === false);
@@ -1060,7 +1142,7 @@ t = boot(); t.fcTm();
 const stableId = W.schedules[0].id;
 W.fail["Schedule.Delete"] = true;
 const stableStart = W.calls.length;
-t.stale(); t.loop();
+t.jumpToNextDay(); t.loop();
 check("S24 same polarity does not disable the working schedule", !t.err && W.schedules[0].id === stableId && W.schedules[0].enable && !W.calls.slice(stableStart).some(c => c.method === "Schedule.Update"));
 
 // =====================================================================
@@ -1096,7 +1178,7 @@ for (const priorSuccess of [false, true]) {
         if (bad === "read failure") W.fail["KVS.Get"] = p => p.key === "SmartHeatingSys1";
         else W.kvs.SmartHeatingSys1 = bad;
         const before = JSON.stringify([W.kvs, W.schedules, W.relayConfigs]);
-        t.stale(); t.fcTm(); t.flush(); t.loop(); t.flush();
+        t.jumpToNextDay(); t.fcTm(); t.flush(); t.loop(); t.flush();
         check("S26 " + bad + (priorSuccess ? " after success" : " at boot") + " preserves identity and relay",
             !t.err && JSON.stringify([W.kvs, W.schedules, W.relayConfigs]) === before && t.drive("JSON.stringify(s)") === knownState,
             String(t.err || ""));
@@ -1118,7 +1200,7 @@ t = boot(true); t.fcTm(); t.flush();
 const deletedRecordId = W.schedules[0].id;
 delete W.kvs.SmartHeatingSys1;
 W.kvs.SmartHeatingConf1 = conf({ HeatingTime: 2 });
-t.stale(); t.loop(); t.flush();
+t.jumpToNextDay(); t.loop(); t.flush();
 check("S26 missing SystemData mid-run replaces the known schedule without orphaning it", !t.err &&
     W.deleted.includes(deletedRecordId) && W.schedules.length === 1 && W.schedules[0].id !== deletedRecordId &&
     specHours(W.schedules[0].timespec) === cheapest(EVE.normal, 24, 2, PRICE) &&
@@ -1208,7 +1290,7 @@ for (const complete of [false, true]) {
     W.vcs = [{ key: "group:200", config: { name: "Personal" }, status: { value: ["number:205"] } }];
     if (complete) W.vcs.push(...VC_SET.slice(1).map(e => ({ key: e[0], config: { name: e[1] }, status: { value: e[2] } })));
     const group = JSON.stringify(W.vcs[0]);
-    t = boot(true); t.fcTm(); t.flush(); t.stale(); t.loop(); t.flush();
+    t = boot(true); t.fcTm(); t.flush(); t.jumpToNextDay(); t.loop(); t.flush();
     check("S30 custom group survives " + (complete ? "normal reads" : "control installation"), !t.err &&
         W.schedules.length === 1 && JSON.stringify(W.vcs[0]) === group && !W.calls.some(c => c.method === "Group.Set"));
 }
@@ -1217,7 +1299,7 @@ for (const complete of [false, true]) {
 W = freshWorld(); W.http = priceServer(PRICE); W.kvs.SmartHeatingConf1 = conf({ HeatingTime: 0, AlwaysOnPrice: -1 });
 W.schedules = [{ id: 41, enable: true, timespec: "0 0 1 * * *", calls: [{ method: "Switch.Set", params: { id: 0, on: true } }] }];
 const foreignJobs = JSON.stringify(W.schedules);
-t = boot(true); t.fcTm(); t.flush(); t.stale(); t.loop(); t.flush();
+t = boot(true); t.fcTm(); t.flush(); t.jumpToNextDay(); t.loop(); t.flush();
 check("S31 no recorded ID skips schedule listing and preserves other jobs", !t.err &&
     !W.calls.some(c => c.method === "Schedule.List") && JSON.stringify(W.schedules) === foreignJobs &&
     JSON.parse(W.kvs.SmartHeatingSys1).ExistingSchedule === 0);
@@ -1245,7 +1327,7 @@ for (const fault of ["omitted entry", "missing status"]) {
     else delete control.status;
     const before = JSON.stringify([W.kvs, W.vcs, W.schedules, W.relayConfig]);
     const start = W.calls.length, logStart = prints.length;
-    t.stale(); t.loop(); t.flush();
+    t.jumpToNextDay(); t.loop(); t.flush();
     check("S36 " + fault + " changes neither controls nor heating", !t.err &&
         JSON.stringify([W.kvs, W.vcs, W.schedules, W.relayConfig]) === before &&
         !W.calls.slice(start).some(c => ["Virtual.Add", "Virtual.Delete", "Switch.SetConfig", "Switch.Set",
@@ -1268,7 +1350,7 @@ for (const total of [undefined, null, "10"]) {
         W.componentTotal = total;
         const before = JSON.stringify([W.kvs, W.vcs, W.schedules, W.relayConfig]);
         const start = W.calls.length, logStart = prints.length;
-        t.stale(); t.fcTm(); t.flush();
+        t.jumpToNextDay(); t.fcTm(); t.flush();
         check("S36b total=" + String(total) + ", installed=" + installed + " pauses without changing state", !t.err &&
             JSON.stringify([W.kvs, W.vcs, W.schedules, W.relayConfig]) === before &&
             !W.calls.slice(start).some(c => ["Virtual.Add", "Virtual.Delete", "Switch.SetConfig", "Switch.Set",
@@ -1284,7 +1366,7 @@ for (const total of [undefined, null, "10"]) {
 for (const response of [{}, { id: 201 }, { id: "200" }]) {
     vcWorld(); W.groupCreateResponse = response;
     const logStart = prints.length;
-    t = boot(true); t.fcTm(); t.flush(); t.stale(); t.loop(); t.flush();
+    t = boot(true); t.fcTm(); t.flush(); t.jumpToNextDay(); t.loop(); t.flush();
     check("S37 unverified create response " + JSON.stringify(response) + " leaves membership alone and heating active", !t.err &&
         W.schedules.length === 1 && !W.calls.some(c => c.method === "Group.Set") &&
         W.addAttempts.filter(k => k === "group:200").length === 1 &&
@@ -1330,7 +1412,7 @@ for (const inverted of [false, true]) {
         if (prior) { t.fcTm(); t.flush(); }
         const existing = JSON.stringify([W.kvs, W.schedules, W.relayConfigs]);
         const errorLog = prints.length;
-        W.http = () => [null, -114]; t.stale(); t.fcTm(); t.flush(); t.loop(); t.flush();
+        W.http = () => [null, -114]; t.jumpToNextDay(); t.fcTm(); t.flush(); t.loop(); t.flush();
         check("S42 threshold-only outage preserves state, inverted=" + inverted + ", prior=" + prior, !t.err &&
             JSON.stringify([W.kvs, W.schedules, W.relayConfigs]) === existing &&
             prints.slice(errorLog).some(l => l.includes("Threshold-only mode") && l.includes("Schedule updates are paused")) &&
@@ -1338,7 +1420,7 @@ for (const inverted of [false, true]) {
         W.http = priceServer(h => h < 2 ? 0 : 100); t.loop(); t.flush();
         check("S42 threshold-only pricing resumes, inverted=" + inverted + ", prior=" + prior, !t.err &&
             W.schedules.length === 1 && specHours(W.schedules[0].timespec) === "0,1" && W.schedules[0].calls[0].params.on === !inverted);
-        W.http = priceServer(() => 100); t.stale(); t.loop(); t.flush();
+        W.http = priceServer(() => 100); t.jumpToNextDay(); t.loop(); t.flush();
         check("S42 valid prices can still stop threshold-only heating, inverted=" + inverted + ", prior=" + prior, !t.err &&
             W.schedules.length === 0 && JSON.parse(W.kvs.SmartHeatingSys1).ExistingSchedule === 0);
     }
@@ -1452,8 +1534,8 @@ for (const failure of ["Virtual.Add", "Group.Set"]) {
     check("N4 " + failure + " group RPC failure includes its code and reason", prints.slice(logStart).some(l =>
         l.includes("Group setup incomplete") && l.includes("-1") && l.includes("forced failure")));
     const later = W.calls.length;
-    t.loop(); t.flush(); t.stale(); t.loop(); t.flush();
-    W.fail = {}; t.stale(); t.loop(); t.flush();
+    t.loop(); t.flush(); t.jumpToNextDay(); t.loop(); t.flush();
+    W.fail = {}; t.jumpToNextDay(); t.loop(); t.flush();
     t = boot(true); t.fcTm(); t.flush();
     check("N4 " + failure + " has no group RPC or repeated failure log on later cycles/restart", !t.err &&
         W.schedules.length === 1 && !W.calls.slice(later).some(groupCall) &&
@@ -1466,10 +1548,10 @@ for (const backup of [undefined, "invalid JSON", OLD_BACKUP]) {
     if (backup !== undefined) W.kvs.SmartHeatingVC1 = backup;
     t = boot(true); t.fcTm(); t.flush();
     const installed = !t.err && W.schedules.length === 1;
-    t.stale(); t.loop(); t.flush();
+    t.jumpToNextDay(); t.loop(); t.flush();
     W.vcs = W.vcs.filter(v => v.key !== "number:203");
     const before = JSON.stringify([W.vcs, W.schedules, W.relayConfig]);
-    t.stale(); t.loop(); t.flush();
+    t.jumpToNextDay(); t.loop(); t.flush();
     check("N5 obsolete backup " + String(backup) + " is never read or written", installed && !t.err &&
         JSON.stringify([W.vcs, W.schedules, W.relayConfig]) === before &&
         !W.calls.some(c => c.params?.key === "SmartHeatingVC1") && W.kvs.SmartHeatingVC1 === backup);
@@ -1579,6 +1661,228 @@ W.kvs.SmartHeatingConf1 = conf({ HeatingTime: 3, EnergyProvider: "VORK4",
 t = boot(); t.fcTm();
 check("S47 tariff tie retains market-price filtering after the cutoff without backfill", !t.err &&
     W.schedules.length === 1 && specHours(W.schedules[0].timespec) === "21", W.schedules);
+
+// S48. A useful schedule includes its timing, enabled state and complete command.
+for (const inverted of [false, true]) {
+    for (const offline of [false, true]) {
+        scenario("S48 full schedule contract, inverted=" + inverted + ", offline=" + offline, () => {
+            W.kvs.SmartHeatingConf1 = conf({ RelayId: 1, InvertedRelay: inverted });
+            W.http = offline ? () => [null, -114] : priceServer(PRICE);
+            const runtime = boot(true); runtime.fcTm(); runtime.flush();
+            expectSchedule(runtime, offline ? FALLBACK : cheapest(EVE.normal, 24, 10, PRICE),
+                { relayId: 1, inverted });
+        });
+    }
+}
+
+// S49. Hand-computed forecast demand and the warm-weather clamp. Prices rise
+// with the hour; expected hour lists reuse neither production math nor the oracle.
+for (const fixture of [
+    // Mean 2.2 -> ceil 3. Daily demand: (16 - 3)/2 - 2 = 4.5 -> floor 4.
+    { name: "24h fractional mean", period: 24, temperatures: [1.2, 3.2], curve: 0, hours: "0,1,2,3" },
+    // Curve +1 adds two daily hours: (4.5 + 2)/2 = 3.25 -> floor 3.
+    { name: "12h positive curve", period: 12, temperatures: [1.2, 3.2], curve: 1, hours: "0,1,2" },
+    // Mean -4.2 -> ceil -4. ((16 + 4)/2 - 2 + 2)/4 = 2.5 -> floor 2.
+    { name: "6h negative temperature", period: 6, temperatures: [-6.2, -2.2], curve: 1, hours: "0,1" },
+    // Curve -1 removes two daily hours: 4.5 - 2 = 2.5 -> floor 2.
+    { name: "24h negative curve", period: 24, temperatures: [1.2, 3.2], curve: -1, hours: "0,1" },
+    // Mean 17 exceeds the 16-degree reference. The formula gives
+    // (16 - 17)/2 - 2 + 4*2 = 5.5 hours, but the warm-weather clamp must zero it.
+    { name: "24h warm forecast with positive curve", period: 24, temperatures: [17, 17], curve: 4, hours: null },
+]) {
+    scenario("S49 " + fixture.name + (fixture.hours === null
+        ? " overrides positive formula demand above the reference" : " uses calculated demand between clamps"), () => {
+        W.kvs.SmartHeatingConf1 = conf({ TimePeriod: fixture.period, HeatingTime: 0,
+            IsForecastUsed: true, HeatingCurve: fixture.curve, AlwaysOnPrice: -999 });
+        W.http = p => p.url.includes("open-meteo")
+            ? [{ code: 200, body: JSON.stringify({ hourly: { apparent_temperature: fixture.temperatures } }) }, 0]
+            : priceServer(h => h + 10)(p);
+        const runtime = boot(true); runtime.fcTm(); runtime.flush();
+        expectSchedule(runtime, fixture.hours);
+    });
+}
+
+// S50. Exercise both comparison sites, with adjacent prices distinguishing the
+// boundary from always-on/off behavior. Off wins when thresholds overlap.
+for (const period of [0, 24]) {
+    scenario("S50 period=" + period + " includes exactly the forced-on boundary", () => {
+        W.kvs.SmartHeatingConf1 = conf({ TimePeriod: period, HeatingTime: 0,
+            AlwaysOnPrice: 20, AlwaysOffPrice: 100 });
+        W.http = priceServer(h => h === 0 ? 20 : h === 1 ? 20.01 : 100);
+        const runtime = boot(true); runtime.fcTm(); runtime.flush();
+        expectSchedule(runtime, "0");
+    });
+    scenario("S50 period=" + period + " excludes exactly the forced-off boundary", () => {
+        W.kvs.SmartHeatingConf1 = conf({ TimePeriod: period, HeatingTime: 3,
+            AlwaysOnPrice: period === 0 ? 30 : -999, AlwaysOffPrice: 20 });
+        W.http = priceServer(h => h === 0 ? 19.99 : h === 1 ? 20 : h === 2 ? 20.01 : 100);
+        const runtime = boot(true); runtime.fcTm(); runtime.flush();
+        expectSchedule(runtime, "0");
+    });
+}
+scenario("S50 timed thresholds override the cheapest count in both directions", () => {
+    W.kvs.SmartHeatingConf1 = conf({ HeatingTime: 1, EnergyProvider: "VORK4",
+        AlwaysOnPrice: 20, AlwaysOffPrice: 25 });
+    // 00:00 ranks first (26 + 21 = 47) but is forced off. 12:00 ranks
+    // second (19 + 36.9 = 55.9), outside the one-hour count, but is forced on.
+    W.http = priceServer(h => h === 0 ? 26 : h === 12 ? 19 : 100);
+    const runtime = boot(true); runtime.fcTm(); runtime.flush();
+    expectSchedule(runtime, "12");
+});
+
+// S51. Independent tariff differences put two hours one cent either side of
+// a ranking reversal. A uniform fee cannot affect ranking; see S52 instead.
+const tariffCases = [
+    { pack: "VORK2", delta: 25.6 }, { pack: "VORK4", delta: 15.9 },
+    { pack: "VORK5", delta: 22.6 }, { pack: "PARTN12", delta: 30.4 },
+    { pack: "PARTN12PL", delta: 19.3 },
+].map(f => ({ ...f, name: f.pack + " day/night", eve: EVE.normal, hour: 8 }));
+// VORK5 winter weekdays: night 30.3, day 52.9, peak 81.8.
+for (const [hour, delta] of [[6, 0], [7, 22.6], [8, 22.6], [9, 51.5], [11, 51.5],
+    [12, 22.6], [15, 22.6], [16, 51.5], [19, 51.5], [20, 22.6], [21, 22.6], [22, 0]]) {
+    tariffCases.push({ pack: "VORK5", name: "winter weekday hour " + hour, eve: EVE.normal, hour, delta });
+}
+// Weekend peak 47.4 versus night 30.3; morning remains night rate (S5).
+for (const [hour, delta] of [[9, 0], [15, 0], [16, 17.1], [19, 17.1], [20, 0]]) {
+    tariffCases.push({ pack: "VORK5", name: "winter weekend hour " + hour,
+        eve: "2026-01-09T23:30:00+02:00", hour, delta });
+}
+for (const [eve, hour, delta] of [
+    ["2026-03-30T23:30:00+03:00", 9, 51.5], // March 31: peak season includes March.
+    ["2026-03-31T23:30:00+03:00", 9, 22.6], // April 1: ordinary day rate.
+    ["2026-10-30T23:30:00+02:00", 16, 0],  // October 31: ordinary weekend night rate.
+    ["2026-10-31T23:30:00+02:00", 16, 17.1], // November 1: weekend peak begins.
+]) tariffCases.push({ pack: "VORK5", name: "season boundary " + eve.slice(0, 10), eve, hour, delta });
+for (const [eve, boundaries] of [
+    [EVE.normal, [[6, 0], [7, 30.4], [22, 30.4], [23, 0]]],
+    ["2026-07-14T23:30:00+03:00", [[7, 0], [8, 30.4], [22, 30.4], [23, 30.4]]],
+    ["2026-01-09T23:30:00+02:00", [[12, 0]]],
+    ["2026-07-17T23:30:00+03:00", [[12, 0]]],
+]) {
+    for (const [hour, delta] of boundaries) tariffCases.push({ pack: "PARTN12",
+        name: "Imatra boundary " + eve.slice(0, 10) + " hour " + hour, eve, hour, delta });
+}
+for (const fixture of tariffCases) {
+    for (const cent of [-0.01, 0.01]) {
+        scenario("S51 " + fixture.name + " ranking difference " + cent, () => {
+            FIXED_MS = new RealDate(fixture.eve).getTime(); W = freshWorld();
+            W.kvs.SmartHeatingConf1 = conf({ EnergyProvider: fixture.pack,
+                HeatingTime: 1, AlwaysOnPrice: -999, AlwaysOffPrice: 9999 });
+            W.http = priceServer(h => h === fixture.hour ? 10 : h === 0 ? 10 + fixture.delta + cent : 1000);
+            const runtime = boot(true); runtime.fcTm(); runtime.flush();
+            expectSchedule(runtime, cent < 0 ? "0" : String(fixture.hour));
+        });
+    }
+}
+
+// S52. Uniform fees leave rankings unchanged. Thresholds must still compare
+// the market price, in both modes and at both inclusive boundaries.
+for (const pack of ["VORK1", "PARTN24", "PARTN24PL", "PAMATA1", "SPECIAL1", "NONE"]) {
+    for (const period of [0, 24]) {
+        for (const boundary of ["on", "off"]) {
+            scenario("S52 " + pack + " period=" + period + " market-price " + boundary + " boundary", () => {
+                const on = boundary === "on";
+                W.kvs.SmartHeatingConf1 = conf({ EnergyProvider: pack, TimePeriod: period,
+                    HeatingTime: on ? 0 : 3, AlwaysOnPrice: on ? 20 : period === 0 ? 30 : -999,
+                    AlwaysOffPrice: on ? 100 : 25 });
+                W.http = priceServer(h => on
+                    ? h === 0 ? 20 : h === 1 ? 20.01 : 100
+                    : h === 0 ? 24.99 : h === 1 ? 25 : h === 2 ? 25.01 : 100);
+                const runtime = boot(true); runtime.fcTm(); runtime.flush();
+                expectSchedule(runtime, "0");
+            });
+        }
+    }
+}
+
+// S53. System entry points: only boot and time passage, never fcTm/loop calls.
+for (const random of [0, 0.5]) {
+    scenario("S53 registered startup timer and jitter=" + random + " start heating", () => {
+        W.kvs.SmartHeatingConf1 = conf(); W.http = priceServer(PRICE);
+        const start = W.now, runtime = boot(true, { random });
+        const due = start + 1000 + (random === 0 ? 0 : 2000);
+        runtime.advanceTo(due - 1);
+        assert.equal(W.calls.length, 0, "no RPC before startup timer and jitter elapse");
+        runtime.advanceBy(501);
+        expectSchedule(runtime, cheapest(EVE.normal, 24, 10, PRICE));
+        assert.equal(Date.now(), due + 500, "script clock advances exactly to the bound");
+        assert.equal(W.unixtime, Date.now() / 1000, "device and script clocks agree");
+    });
+}
+scenario("S53 price outage retries at five minutes, never early, then recovers", () => {
+    W.kvs.SmartHeatingConf1 = conf(); W.http = () => [null, -114];
+    const start = W.now, runtime = boot(true);
+    runtime.advanceBy(1500);
+    expectSchedule(runtime, FALLBACK);
+    const fallbackId = W.schedules[0].id;
+    W.http = priceServer(PRICE2);
+    runtime.advanceTo(start + 300000 - 1);
+    assert.ifError(runtime.err);
+    assert.equal(W.calls.filter(c => c.method === "HTTP.GET").length, 1, "no early price retry");
+    assert.equal(W.schedules[0].id, fallbackId, "fallback remains until retry is due");
+    const limits = runtime.advanceBy(501);
+    expectSchedule(runtime, cheapest(EVE.normal, 24, 10, PRICE2));
+    assert.equal(W.calls.filter(c => c.method === "HTTP.GET").length, 2, "one retry at five minutes");
+    assert.ok(W.deleted.includes(fallbackId), "successful retry replaces fallback");
+    assert.ok(limits.rpcPeak <= 5 && limits.timerPeak <= 5, "device resource limits");
+});
+scenario("S53 local failure retries on consecutive five-minute ticks", () => {
+    W.kvs.SmartHeatingConf1 = conf(); W.http = priceServer(PRICE);
+    W.fail["Schedule.Create"] = true;
+    const start = W.now, runtime = boot(true);
+    const attempts = () => W.calls.filter(c => c.method === "Schedule.Create").length;
+    runtime.advanceBy(1500);
+    assert.equal(attempts(), 1, "first creation attempted");
+    runtime.advanceTo(start + 300000 - 1);
+    assert.equal(attempts(), 1, "first retry is not early");
+    runtime.advanceBy(501);
+    assert.equal(attempts(), 2, "first retry attempted");
+    delete W.fail["Schedule.Create"];
+    runtime.advanceTo(start + 600000 - 1);
+    assert.equal(attempts(), 2, "second retry is not early");
+    runtime.advanceBy(501);
+    expectSchedule(runtime, cheapest(EVE.normal, 24, 10, PRICE));
+    assert.equal(attempts(), 3, "repeating timer produces a second retry");
+});
+scenario("S53 daily refresh waits for its randomized update minute and repeats next day", () => {
+    FIXED_MS = new RealDate("2026-01-13T22:58:00+02:00").getTime(); W = freshWorld();
+    W.kvs.SmartHeatingConf1 = conf(); W.http = priceServer(PRICE);
+    // random=.5 selects update minute 23, and two seconds of startup jitter.
+    const runtime = boot(true, { random: 0.5 });
+    runtime.advanceBy(3500);
+    expectSchedule(runtime, cheapest(EVE.normal, 24, 10, PRICE));
+    const firstId = W.schedules[0].id;
+    const requests = () => W.calls.filter(c => c.method === "HTTP.GET").length;
+    runtime.advanceTo(new RealDate("2026-01-13T23:23:00+02:00").getTime() - 1);
+    assert.equal(requests(), 1, "ticks before the configured update minute retain today's prices");
+    assert.equal(W.schedules[0].id, firstId);
+    runtime.advanceBy(501);
+    assert.equal(requests(), 2, "refresh at the due tick");
+    assert.equal(RealDate.parse(new URL(W.lastUrl).searchParams.get("start")), RealDate.parse("2026-01-13T22:00:00Z"),
+        "request starts at tomorrow's local midnight");
+    const nextId = W.schedules[0].id;
+    runtime.advanceTo(new RealDate("2026-01-14T23:23:00+02:00").getTime() - 1);
+    assert.equal(requests(), 2, "no duplicate refresh before the following day's update minute");
+    assert.equal(W.schedules[0].id, nextId);
+    runtime.advanceBy(501);
+    expectSchedule(runtime, cheapest(EVE.normal, 24, 10, PRICE));
+    assert.equal(requests(), 3, "next day's repeating tick refreshes again");
+    assert.equal(RealDate.parse(new URL(W.lastUrl).searchParams.get("start")), RealDate.parse("2026-01-14T22:00:00Z"));
+});
+
+scenario("S53 missing device time waits thirty seconds, falls back, then synchronizes", () => {
+    W.unixtime = 0; W.kvs.SmartHeatingConf1 = conf(); W.http = priceServer(PRICE);
+    const runtime = boot(true);
+    runtime.advanceBy(30999);
+    assert.equal(W.calls.length, 0, "no heating calculation during the initial time wait");
+    runtime.advanceBy(501);
+    expectSchedule(runtime, FALLBACK);
+    assert.equal(W.calls.filter(c => c.method === "HTTP.GET").length, 0, "no dated request without device time");
+    W.unixtime = W.now / 1000;
+    runtime.advanceBy(1000);
+    expectSchedule(runtime, cheapest(EVE.normal, 24, 10, PRICE));
+    assert.equal(W.calls.filter(c => c.method === "HTTP.GET").length, 1, "next time-check callback resumes online heating");
+});
 
 console.log(failures === 0 ? "\nALL SPEC CHECKS PASSED" : "\n" + failures + " SPEC FAILURES");
 process.exit(failures === 0 ? 0 : 1);

@@ -8,6 +8,19 @@ const sourcePath = path.resolve(process.argv[2] || path.join(__dirname, '..', 'S
 const source = fs.readFileSync(sourcePath, 'utf8');
 const suite = path.join(__dirname, 'spec.js');
 const mutations = [
+    ['watchdog-restarted-each-cycle', 'S13',
+        'if (status && status.running) {\n            _.isLp = false;\n            return;',
+        'if (false) {\n            _.isLp = false;\n            return;'],
+    ['incomplete-quarter-day', 'S14', '!valid || qCnt !== qExp', '!valid'],
+    ['unbounded-fallback-hours', 'S10', 'const fbTim = c.hTim > c.tPer ? c.tPer : c.hTim;', 'const fbTim = c.hTim;'],
+    ['firmware-minimum-exclusive', 'S40', 'return true; //equal versions meet the minimum requirement', 'return false; //reject equal firmware'],
+    ['older-pro-firmware-accepted', 'S40', "verC('1.4.3',", "verC('1.4.2',"],
+    ['forecast-user-minimum-ignored', 'S6', '_.hTim = c.hTim;', '_.hTim = 0;'],
+    ['forecast-minimum-without-demand', 'S6', 'fcTm > 0 && _.hTim < c.hTim', '_.hTim < c.hTim'],
+    ['repeated-hour-prices-averaged', 'S27', 'if (count < 4) { sum += row[1]; count++; }', 'sum += row[1]; count++;'],
+    ['schedule-id-lost-on-read-error', 'S26',
+        'if (err !== 0 || !res) { print(_.pId, "SystemData read failed:", err, msg); return; }',
+        'if (err !== 0 || !res) { s.exSc = 0; print(_.pId, "SystemData read failed:", err, msg); return; }'],
     ['cron-minute', 'S48', 'timespec: "0 0 " + hrs', 'timespec: "0 30 " + hrs'],
     ['disabled-schedule', 'S48', 'enable: true,\n        timespec:', 'enable: false,\n        timespec:'],
     ['wrong-relay', 'S48', '                id: c.rId,', '                id: 0,'],

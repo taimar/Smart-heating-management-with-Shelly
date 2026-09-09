@@ -276,7 +276,7 @@ Virtual Component installation follows these rules. Failed or invalid configurat
 | --- | --- |
 | All nine present and valid | Use their values for heating. |
 | All nine absent | Install defaults, including when switching from KVS mode with an existing SystemData record. |
-| Some absent | Pause schedule updates and name every missing control, whether SystemData exists or not. |
+| Some absent | Pause schedule updates and report **“Missing controls”**, naming every missing control, whether SystemData exists or not. |
 | Invalid/conflicting controls or failed/incomplete reads | Pause without changing controls, relay settings or schedules. |
 
 Every inventory page must include a numeric `total`, even when one page contains all nine valid controls. This unreleased version also applies this requirement to normal reads; older code could accept a complete single page without it. A missing or nonnumeric total pauses updates and installation until a valid response arrives. If a listed control exists but is omitted from a response or has no usable value, wait for the next five-minute read. Restore a control manually only if it is actually missing.
@@ -285,7 +285,7 @@ If an interrupted installation leaves any of the nine controls missing alongside
 
 During installation, controls are added first. An absent group is then created once and populated only after its creation is confirmed, followed by a complete control read. If that read still finds a partial set, no second install is attempted in that calculation; the next calculation also pauses until manual recovery. Existing groups retain their names and membership. If a group already exists while all nine control slots are empty, the new controls are not added to that group automatically; group them manually if needed. **“Group setup incomplete”** means grouping needs manual attention; heating can proceed. There are no group retries on later heating calculations or restarts with complete controls. A restart between control creation and grouping can leave the group absent or empty; create or populate it manually if needed.
 
-A failed SystemData read pauses calculation. A failed write retries the same record before another calculation. A restart or power cut before that write succeeds can still leave an unrecorded schedule. The script uses the recorded ID to manage its schedule; it does not discover or recover orphan schedules. With no recorded ID, it skips schedule listing.
+A failed SystemData read pauses calculation. A failed write retries the same record before another calculation. A restart or power cut before that write succeeds can still leave an unrecorded schedule. The script uses the recorded ID to manage its schedule; it does not discover or recover orphan schedules. With no recorded ID, it skips schedule listing. After a failed polarity transition, the previous schedule may remain disabled until a successful retry.
 
 The price feed must contain all 92, 96 or 100 quarter-hour rows for the local day. Historical hourly responses are not supported. At the autumn clock change, the repeated hour uses its first occurrence's price because [Shelly cron runs it only once, at that first occurrence](https://shelly-api-docs.shelly.cloud/gen2/ComponentsAndServices/Schedule/). All quarters of the second occurrence are still validated. The spring day has 23 schedulable hours.
 

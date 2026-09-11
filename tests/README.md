@@ -8,7 +8,7 @@ TZ=Europe/Tallinn node tests/spec.js SmartHeatingWithShelly.js
 
 The [Tests workflow](../.github/workflows/tests.yml) runs the suite and mutation checks on pushes, pull requests, and manual dispatch, with a ten-minute job timeout.
 
-The production installation and recovery contract is documented under [Updating Script](../README.md#updating-script), also available in [Estonian](../README-ET.md#skripti-uuendamine).
+The production installation and recovery contract is documented under [Virtual Component installation and recovery](../README.md#virtual-component-installation-and-recovery), also available in [Estonian](../README-ET.md#virtuaalkomponentide-paigaldamine-ja-taastamine).
 
 ## Finding scenarios
 

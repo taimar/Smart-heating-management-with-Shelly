@@ -1,11 +1,11 @@
 # Smart and cheap heating with Shelly
 
 > [!TIP]
-> This Shelly script is designed to optimize heating activation by leveraging energy market prices from Elering, ensuring heating operates during the most cost-effective hours using various algorithms.
+> This script selects heating hours using Elering electricity prices, fixed heating periods and optional weather forecasts.
 
 > [!IMPORTANT]
 > Starting October 1, 2025, Elering switched to 15-min electricity price intervals, which means their API structure has changed. To keep your Shelly automation working, you need to:
-> 
+>
 > ✅ Update Your Shelly Script
 > * Minimum required version: 4.8 or later
 > * Reason: Older scripts assume hourly prices, but now the API returns 15-minute intervals.
@@ -13,14 +13,11 @@
 > [!IMPORTANT]
 > Quarter-hour prices contain four times as many rows as hourly prices. Peak memory for this version has not been measured on a Shelly device. Check `mem_used` and `mem_peak` on your device before relying on multiple instances.
 
-
 - [Smart and cheap heating with Shelly](#smart-and-cheap-heating-with-shelly)
   - [Key Features](#key-features)
-  - [Monitoring and edit schedule](#monitoring-and-edit-schedule)
-  - [How to check the Heating Schedule](#how-to-check-the-heating-schedule)
+  - [Monitoring and editing the schedule](#monitoring-and-editing-the-schedule)
   - [Configuring Script parameters](#configuring-script-parameters)
     - [Configuration using Virtual Components](#configuration-using-virtual-components)
-    - [How to force script to KVS mode](#how-to-force-script-to-kvs-mode)
     - [Configuration using KVS](#configuration-using-kvs)
       - [Heating parameters](#heating-parameters)
       - [``"EnergyProvider": "VORK1"``](#energyprovider-vork1)
@@ -30,247 +27,181 @@
       - [``"RelayId": 0``](#relayid-0)
       - [``"Country": "ee"``](#country-ee)
       - [``"HeatingCurve": 0``](#heatingcurve-0)
+    - [Virtual Component installation and recovery](#virtual-component-installation-and-recovery)
 - [How to Install this Script](#how-to-install-this-script)
   - [Installation](#installation)
   - [How to run two instances of this script](#how-to-run-two-instances-of-this-script)
-    - [How to force script to KVS mode](#how-to-force-script-to-kvs-mode-1)
   - [Updating Script](#updating-script)
-  - [How to Verify Script Execution](#how-to-verify-script-execution)
   - [How the Script Operates](#how-the-script-operates)
   - [Important To Know](#important-to-know)
   - [Tested Failure Scenarios](#tested-failure-scenarios)
-- [Smart Heating for Thermia Villa \& Eko Classic Using Shelly](#smart-heating-for-thermia-villa--eko-classic-using-shelly)
+- [Smart Heating for Thermia Villa & Eko Classic Using Shelly](#smart-heating-for-thermia-villa--eko-classic-using-shelly)
 - [Smart Heating Algorithms](#smart-heating-algorithms)
   - [Weather Forecast Algorithm](#weather-forecast-algorithm)
-    - [Advantages of Weather Forecast-Based Heating](#advantages-of-weather-forecast-based-heating)
     - [Shelly Geolocation](#shelly-geolocation)
     - [Heating Curve](#heating-curve)
   - [Time Period Algorithm](#time-period-algorithm)
 - [Does it Truly Reduce My Electric Bills](#does-it-truly-reduce-my-electric-bills)
 - [Troubleshooting](#troubleshooting)
   - [Error "Couldn't get script"](#error-couldnt-get-script)
-  - [Advanced → Key Value Storage → Script Data](#advanced--key-value-storage--script-data)
 - [License](#license)
 - [Author](#author)
 
 ## Key Features
-1. **Dynamic Heating Time Calculation**:
-Calculates optimal heating times for the next day based on weather forecasts and energy prices.
 
-1. **Time Period Division**:
-Divides the day into time periods and activates heating during the cheapest hour within each period.
+1. **Forecast heating:** calculates heating hours from the forecast apparent temperature.
+2. **Fixed heating periods:** selects the cheapest hours within each 6-, 12- or 24-hour period.
+3. **Price thresholds:** adds or excludes heating hours based on market-price limits.
+4. **Two instances on one device:** supports separate heating needs; see [running two instances](#how-to-run-two-instances-of-this-script).
 
-1. **Price-Level Utilization**:
-Employs minimum and maximum price thresholds to keep the Shelly system consistently on or off based on cost efficiency.
+<a name="monitoring-and-edit-schedule"></a>
+<a name="how-to-check-the-heating-schedule"></a>
+<a name="how-to-verify-script-execution"></a>
+<a name="advanced--key-value-storage--script-data"></a>
+## Monitoring and editing the schedule
 
-1. **Two script instances can run on same Shelly device**:
-Starting from the version 4.2, two script instances are supported on same Shelly device. The script memory usage was reduced from 16kB to 4.3kB and peak memory reduced from 25kB to 12kB.
+The script uses one schedule containing all selected heating hours.
 
-**Execution Schedule**:
-The script runs daily after 23:00 or as necessary during the day to set up heating time slots for the upcoming period.    
+1. Open **Schedules** in the Shelly app or device web interface.
+2. Open the script's schedule and click **Time** to see the selected hours.
 
-## Monitoring and edit schedule
+| Open the schedule | Inspect and edit hours |
+| --- | --- |
+| <img src="images/oneschedule.jpg" alt="Open the schedule" width="200"> | <img src="images/editschedule.jpg" alt="Edit heating hours" width="200"> |
 
-> [!NOTE]
-> Starting from the script version 3.9 (January 2025), this script creates a single scheduler using an advanced timespec that includes all the required heating hours.
+To add or remove hours manually, click them and select **Next → Next → Save**. Your edits remain until the script replaces the schedule after its next calculation.
 
-## How to check the Heating Schedule
-To view the heating hours created by the script:
-1. Open the schedule.
-2. Click on Time to see the full heating schedule.
+In the device web interface, **Advanced → KVS** contains one JSON record named `SmartHeatingSys<ScriptId>`, for example `SmartHeatingSys1` for script ID 1:
 
-|||
-|-|-|
-|<img src="images/oneschedule.jpg" alt="Open Schedule" width="200">|<img src="images/editschedule.jpg" alt="Open Schedule" width="200">|
+| Field | Meaning |
+| --- | --- |
+| `ExistingSchedule` | The recorded ID of this script's schedule; `0` means no schedule is recorded. |
+| `LastCalculation` | The timestamp of the latest recorded scheduling result. |
+| `Version` | The heating script version that saved the record. |
 
+`LastCalculation` records the time of a price-based schedule, an offline fallback, no heating hours, or a failed schedule creation. The timestamp stays the same through save retries, so it records the result time rather than the eventual save time. It does not prove that prices were retrieved successfully or that heating occurred.
 
-> [!TIP] 
-> You can manually override the schedule by clicking on any hour to include or exclude it for a specific day, then lick Next &rarr; Next &rarr; Save.  
-> The next time the script calculates a new schedule, it will generate a fresh schedule with the updated timespec.
+After successfully deleting the heating schedule, the watchdog sets `ExistingSchedule` to `0` without changing `LastCalculation`.
 
-**How to monitor script execution**  
-The field ``LastCalculation`` in KVS is updated each time electricity prices are retrieved from Elering and a heating schedule is generated for the next heating period.  
-The field ``ExistingSchedule`` in KVS is the scheduleID created by this script.
+<img src="images/KvsSystem.jpg" alt="SystemData fields in one KVS JSON record" width="750">
 
 ## Configuring Script parameters
 
-### Configuration using Virtual Components 
-> [!TIP]
-> This script supports Shelly Virtual Components, allowing script parameters to be modified remotely using the Shelly app on a mobile phone.
+### Configuration using Virtual Components
 
-Virtual Components are supported on Shelly Gen 2 Pro devices, as well as all newer Gen 3 and later devices.
+Virtual Components let you change the nine heating settings in the Shelly app. `RelayId` is selected in the KVS record in both modes.
 
-<img src="images/ShellyVirtualComponents.jpg" alt="Shelly KVS" width="700">
+Unless KVS mode is forced, the script selects Virtual Component mode on Gen2 Pro devices with firmware 1.4.3 or newer, and on Gen3/Gen4 devices by generation. These installation instructions require firmware 1.4.4 or newer; the mode-selection check is not a complete compatibility test.
 
-### How to force script to KVS mode
+<img src="images/ShellyVirtualComponents.jpg" alt="Shelly Virtual Components" width="700">
 
-> [!TIP]
-> This script can be forced to KVS mode even if Virtal Components are available.  
+<a name="how-to-force-script-to-kvs-mode"></a>
+<a name="how-to-force-script-to-kvs-mode-1"></a>
+### Configuration using KVS
 
-You want to have this in KVS mode in case you have other important scripts already using Virtual Components in the same device.  
-Open the script and set the ManualKVS parameter ``mnKv: true``. Now the script will install in KVS mode.
+In KVS mode, open **Advanced → KVS** in the device web interface. Settings are stored as JSON under `SmartHeatingConf<ScriptId>`, for example `SmartHeatingConf1` for script ID 1. You can use KVS mode on a device with Virtual Components, including for a second heating instance.
 
-```js
-let c = {
-    tPer: 24,       // KVS:TimePeriod VC:Heating Period (h) 24/12/6/0
-    hTim: 10,       // KVS:HeatingTime VC:Heating Time (h/period)
-    isFc: false,    // KVS:IsForecastUsed VC:Forecast Heat
-    pack: "VORK2",  // KVS:EnergyProvider VC:Network Package (NONE, VORK1, VORK2, VORK4, VORK5, PARTN24, PARTN24PL, PARTN12, PARTN12PL, PAMATA1, SPECIAL1)
-    lowR: 1,        // KVS:AlwaysOnPrice VC:Heat On (min price) (EUR/MWh)
-    higR: 300,      // KVS:AlwaysOffPrice VC:Heat Off (max price) (EUR/MWh)
-    Inv: false,     // KVS:InvertedRelay VC:Inverted Relay
-    rId: 0,         // KVS:RelayId selects the relay in both modes; required in saved configuration
-    cnty: "ee",     // KVS:Country VC:Market Price Country (ee, fi, lv, lt)
-    hCur: 0,        // KVS:HeatingCurve VC:Heating Curve 
-    tmr: 60,        // Default timer
-    pFac: 0.5,      // Power factor
-    mnKv: false,    // Forcing script to KVS mode (true) or Virtual components mode (false)
+- **Fresh installation:** set `mnKv: true` in the [script](SmartHeatingWithShelly.js) before its first start. The initial configuration save records this as `ManualKVS`.
+- **Existing KVS installation:** preserve the complete record, set `ManualKVS` to `true`, and restart the script. A saved boolean overrides the default in the script.
+- **Switching from Virtual Components:** the saved record may contain only `{ "ManualKVS": false, "RelayId": 0 }`. KVS mode also requires all nine heating settings. Copy the current control values into the record, preserve `RelayId`, set `ManualKVS` to `true`, and restart the script.
+
+Existing Virtual Components remain on the device, but changing their values in the app has no effect on heating while the script uses KVS mode.
+
+Example configuration: adapt these values to your installation. When switching from Virtual Components, use their current values.
+
+```json
+{
+  "TimePeriod": 24,
+  "HeatingTime": 10,
+  "IsForecastUsed": false,
+  "EnergyProvider": "VORK2",
+  "AlwaysOnPrice": 1,
+  "AlwaysOffPrice": 300,
+  "InvertedRelay": false,
+  "RelayId": 0,
+  "Country": "ee",
+  "HeatingCurve": 0,
+  "ManualKVS": true
 }
 ```
 
-### Configuration using KVS 
-If the script in **KVS mode**, then settings can be modified via the device's web page using its IP address: Menu → Advanced → KVS.  
-All the user settings are stored in JSON format under the key ``SmartHeatingConf``.
-
-> [!IMPORTANT]
-> Starting from the version 4.2, script configuration settings are stored in JSON format in KVS.  
-> This helps to reduce script memory usage and enables to run two script instances in the same Shelly device.
+Enter numbers as JSON numbers (`10`) and booleans as `true` or `false`. Every saved configuration requires a non-negative integer `RelayId`; an omitted value is not defaulted to zero. A fresh installation uses the script's initial `rId` value (`0` by default). Invalid settings are retained for you to correct.
 
 <img src="images/kvsConfigSettings.jpg" alt="Shelly KVS" width="550">
 
-<img src="images/kvsConfigSettingsJson.jpg" alt="Shelly KVS" width="550">
+<img src="images/kvsConfigSettingsJson.jpg" alt="JSON configuration in KVS" width="550">
 
 #### Heating parameters
 
-```
-"TimePeriod": 24,
-"HeatingTime": 10,
-"IsForecastUsed": true,
-``` 
-
-These options are described in the following table.
-
-> You can customize or change the heating modes to better suit your personal preferences and specific situations. This flexibility allows you to adjust the system based on your needs, energy considerations, and comfort requirements. 
+`TimePeriod` supports **0, 6, 12 and 24**. Without forecasting, `HeatingTime` sets the hours selected per period; with forecasting, it is the minimum applied only when heating demand is positive. Price thresholds can change the selected hours. The uses below are starting points for configuration.
 
 |Heating mode|Description|Proposed usage|
 |---|---|---|
-|``"TimePeriod": 24,``<br>``"HeatingTime": 10,`` <br>``"IsForecastUsed": true``|The heating time for **24-hour** period depends on the **outside temperature**.|Concrete floor heating system or big water tank capable of retaining thermal energy for a duration of at least 10 to 15 hours.|
-|``"TimePeriod": 12,``<br>``"HeatingTime": 5,``<br>``"IsForecastUsed": true``|The heating time for each **12-hour** period depends on the **outside temperature**.|Gypsum (kipsivalu) floor heating system or water tank capable of retaining thermal energy for a duration of 5 to 10 hours.|
-|``"TimePeriod": 6,``<br>``"HeatingTime": 2,``<br>``"IsForecastUsed": true``|The heating time for each **6-hour** period depends on the **outside temperature**.|Air source heat pumps, radiators or underfloor heating panels with small water tank capable of retaining energy for a duration of 3 to 6 hours.|
-|``"TimePeriod": 24,``<br>``"HeatingTime": 20,``<br>``"IsForecastUsed": false``|Heating is activated during the **20** most cost-effective hours in a **day**.|Ventilation system.
-|``"TimePeriod": 24,``<br>``"HeatingTime": 12,``<br>``"IsForecastUsed": false``|Heating is activated during the **12** most cost-effective hours in a **day**.|Big water tank 1000L or more.
-|``"TimePeriod": 12,``<br>``"HeatingTime": 6,``<br>``"IsForecastUsed": false``|Heating is activated during the **six** most cost-effective hours within every **12-hour** period.|Big water tank 1000L or more with heavy usage.
-|``"TimePeriod": 12,``<br>``"HeatingTime": 2,``<br>``"IsForecastUsed": false``|Heating is activated during the **two** most cost-effective hours within every **12-hour** period. |A 150L hot water boiler for a little household.
-|``"TimePeriod": 6,``<br>``"HeatingTime": 2,``<br>``"IsForecastUsed": false``|Heating is activated during the **two** most cost-effective hours within every **6-hour** period.|A 200L hot water boiler for a household with four or more people.
-|``"TimePeriod": 0,``<br>``"HeatingTime": 0,``<br>``"IsForecastUsed": false``|Heating is only activated during hours when the **price is lower** than the specified ``alwaysOnLowPrice``.|
+|``"TimePeriod": 24,``<br>``"HeatingTime": 10,`` <br>``"IsForecastUsed": true``|The heating time for **24-hour** period depends on the **forecast apparent temperature**.|Concrete floor heating system or big water tank capable of retaining thermal energy for a duration of at least 10 to 15 hours.|
+|``"TimePeriod": 12,``<br>``"HeatingTime": 5,``<br>``"IsForecastUsed": true``|The heating time for each **12-hour** period depends on the **forecast apparent temperature**.|Gypsum (kipsivalu) floor heating system or water tank capable of retaining thermal energy for a duration of 5 to 10 hours.|
+|``"TimePeriod": 6,``<br>``"HeatingTime": 2,``<br>``"IsForecastUsed": true``|The heating time for each **6-hour** period depends on the **forecast apparent temperature**.|Air source heat pumps, radiators or underfloor heating panels with small water tank capable of retaining energy for a duration of 3 to 6 hours.|
+|``"TimePeriod": 24,``<br>``"HeatingTime": 20,``<br>``"IsForecastUsed": false``|Heating is activated during the **20** most cost-effective hours in a **day**.|Ventilation system.|
+|``"TimePeriod": 24,``<br>``"HeatingTime": 12,``<br>``"IsForecastUsed": false``|Heating is activated during the **12** most cost-effective hours in a **day**.|Big water tank 1000L or more.|
+|``"TimePeriod": 12,``<br>``"HeatingTime": 6,``<br>``"IsForecastUsed": false``|Heating is activated during the **six** most cost-effective hours within every **12-hour** period.|Big water tank 1000L or more with heavy usage.|
+|``"TimePeriod": 12,``<br>``"HeatingTime": 2,``<br>``"IsForecastUsed": false``|Heating is activated during the **two** most cost-effective hours within every **12-hour** period. |A 150L hot water boiler for a little household.|
+|``"TimePeriod": 6,``<br>``"HeatingTime": 2,``<br>``"IsForecastUsed": false``|Heating is activated during the **two** most cost-effective hours within every **6-hour** period.|A 200L hot water boiler for a household with four or more people.|
+|``"TimePeriod": 0,``<br>``"HeatingTime": 0,``<br>``"IsForecastUsed": false``|Heating is selected when the rounded market price is at or below `AlwaysOnPrice`, unless `AlwaysOffPrice` also applies.|
 
 #### ``"EnergyProvider": "VORK1"``
-Defines the Elektrilevi or Imatra electricity transmission tariff package. Options include VORK1, VORK2, VORK4, VORK5, Partner24, Partner24Plus, Partner12, Partner12Plus, and NONE. Select None to ignore transmission fees. 
-Please check the details in this [Elektrilevi page](https://elektrilevi.ee/en/vorguleping/vorgupaketid/eramu) or [Imatra page](https://imatraelekter.ee/vorguteenus/vorguteenuse-hinnakirjad/). Options are the following.
+
+Use an exact `EnergyProvider` value from the table. `NONE` excludes transmission fees. Figures are **rates configured in the script, in EUR/MWh excluding VAT**; check your package against the current [Elektrilevi](https://elektrilevi.ee/en/vorguleping/vorgupaketid/eramu) or [Imatra](https://imatraelekter.ee/vorguteenus/vorguteenuse-hinnakirjad/) price list.
 
 |Network package|Description||
 |---|---|-|
-|``VORK1``|Elektrilevi<br> Day and night basic rate 77 EUR/MWh| <img src="images/Vork1.jpg" alt="Elektrilevi Võrk 1" width="200"> |
-|``VORK2``|Elektrilevi<br> Day 60 EUR/MWh <br> Night 35 EUR/MWh|<img src="images/Vork2-4.jpg" alt="Elektrilevi Võrk 2, 4" width="250">|
-|``VORK4``|Elektrilevi<br> Day 37 EUR/MWh <br> Night 21 EUR/MWh|<img src="images/Vork2-4.jpg" alt="Elektrilevi Võrk 2, 4" width="250">|
-|``VORK5``|Elektrilevi<br> Day 53 EUR/MWh <br> Night 30 EUR/MWh <br> Day Peak time 82 EUR/MWh <br> Holiday Peak Time 47 EUR/MWh|<img src="images/Vork5-1.jpg" alt="Elektrilevi Võrk 5" width="250"><img src="images/Vork5-2.jpg" alt="Elektrilevi Võrk 5" width="250">|
-|``PARTN24``|Imatra<br> Day and night basic rate 60 EUR/MWh|  |
-|``PARTN24PL``|Imatra<br> Day and night basic rate 39 EUR/MWh|  |
-|``PARTN12``|Imatra<br> Day 72 EUR/MWh <br> Night 42 EUR/MWh| Summer Daytime: MO-FR at 8:00–24:00.<br>Summer Night time: MO-FR at 0:00–08:00, SA-SU all day <br> Winter Daytime: MO-FR at 7:00–23:00.<br>Winter Night time: MO-FR at 23:00–7:00, SA-SU all day |
-|``PARTN12PL``|Imatra<br> Day 46 EUR/MWh <br> Night 27 EUR/MWh|Summer Daytime: MO-FR at 8:00–24:00.<br>Summer Night time: MO-FR at 0:00–08:00, SA-SU all day <br> Winter Daytime: MO-FR at 7:00–23:00.<br>Winter Night time: MO-FR at 23:00–7:00, SA-SU all day|
+|``VORK1``|Elektrilevi<br> Day and night basic rate 77.2 EUR/MWh| <img src="images/Vork1.jpg" alt="Elektrilevi Võrk 1" width="200"> |
+|``VORK2``|Elektrilevi<br> Day 60.7 EUR/MWh <br> Night 35.1 EUR/MWh|<img src="images/Vork2-4.jpg" alt="Elektrilevi Võrk 2, 4" width="250">|
+|``VORK4``|Elektrilevi<br> Day 36.9 EUR/MWh <br> Night 21 EUR/MWh|<img src="images/Vork2-4.jpg" alt="Elektrilevi Võrk 2, 4" width="250">|
+|``VORK5``|Elektrilevi<br> Day 52.9 EUR/MWh <br> Night 30.3 EUR/MWh <br> Weekday peak 81.8 EUR/MWh <br> Weekend peak 47.4 EUR/MWh|<img src="images/Vork5-1.jpg" alt="Elektrilevi Võrk 5" width="250"><img src="images/Vork5-2.jpg" alt="Elektrilevi Võrk 5" width="250">|
+|``PARTN24``|Imatra<br> Day and night basic rate 60.7 EUR/MWh|  |
+|``PARTN24PL``|Imatra<br> Day and night basic rate 38.6 EUR/MWh|  |
+|``PARTN12``|Imatra<br> Day 72.4 EUR/MWh <br> Night 42 EUR/MWh| Summer Daytime: MO-FR at 8:00–24:00.<br>Summer Night time: MO-FR at 0:00–08:00, SA-SU all day <br> Winter Daytime: MO-FR at 7:00–23:00.<br>Winter Night time: MO-FR at 23:00–7:00, SA-SU all day |
+|``PARTN12PL``|Imatra<br> Day 46.4 EUR/MWh <br> Night 27.1 EUR/MWh|Summer Daytime: MO-FR at 8:00–24:00.<br>Summer Night time: MO-FR at 0:00–08:00, SA-SU all day <br> Winter Daytime: MO-FR at 7:00–23:00.<br>Winter Night time: MO-FR at 23:00–7:00, SA-SU all day|
 |``PAMATA1``|Latvia, Pamata-1; configured transfer rate 39.62 EUR/MWh|All hours|
 |``SPECIAL1``|Latvia, Speciālais 1; configured transfer rate 158.48 EUR/MWh|All hours|
-|``NONE``|Network fee is set to 0 and it will not taken into account.||
+|``NONE``|Transmission fee is 0; it is excluded from ranking.||
+
+Elektrilevi night rates apply on weekdays from 22:00–07:00 and at weekends, except during VORK5 peak hours. VORK5 peaks apply November–March: weekdays 09:00–12:00 and 16:00–20:00, weekends 16:00–20:00. The script has no public-holiday rule.
 
 #### ``"AlwaysOnPrice": 10``
+
 Market prices are rounded to two decimal places before threshold comparison. Keep heating on when the rounded electricity market price is at or below this value (EUR/MWh), unless ``AlwaysOffPrice`` also applies.
 
 #### ``"AlwaysOffPrice": 300``
+
 Keep heating OFF when the rounded electricity market price is at or above this value (EUR/MWh). This threshold takes precedence if both thresholds apply.
 
 #### ``"InvertedRelay": false``
+
 Configures the relay state to either normal or inverted.
+
 * ``true`` - Inverted relay state. This is required by many heating systems like Nibe or Thermia.
-* ``false`` - Normal relay state, used for water heaters. 
+* ``false`` - Normal relay state, used for water heaters.
 
 #### ``"RelayId": 0``
+
 Configures the Shelly relay ID when using a Shelly device with multiple relays. Default ``0``.
 
 #### ``"Country": "ee"``
-Specifies the country for energy prices. Only countries available in the Elering API are supported. 
+
+Specifies the country for energy prices. Only countries available in the Elering API are supported.
+
 * ``ee`` - Estonia
 * ``fi`` - Finland
 * ``lt`` - Lithuania
 * ``lv`` - Latvia
 
 #### ``"HeatingCurve": 0``
-Forecast impact increases or decreases the number of hours calculated by the algorithm based on the weather forecast. Default ``0``, shifting by 1 equals 1h. This setting is applicable only if weather forecast used.
-Check heating curve impact for [heating time dependency graphs](https://github.com/LeivoSepp/Smart-heating-management-with-Shelly?tab=readme-ov-file#heating-curve).
-    * ``-6`` - less heating
-    * ``6`` - more heating
 
-# How to Install this Script
+Adjusts forecast heating demand; default `0`. One step adds two hours to calculated daily demand before division into periods and application of limits. The warm-weather cutoff, minimum and period length can leave actual hours unchanged. The virtual control accepts **−4 to 8**; KVS accepts any finite number. See the [heating-curve calculation and examples](#heating-curve).
 
-## Installation
+### Virtual Component installation and recovery
 
-1. Optain a Shelly Plus, Pro or Gen3 device [Shelly devices](https://www.shelly.com/collections/smart-monitoring-saving-energy).
-2. Connect the Shelly device to your personal WiFi network. Refer to the [Shelly web interface guides.](https://kb.shelly.cloud/knowledge-base/web-interface-guides)
-
-5. Open the Shelly device web page: Click Settings &rarr; Device Information &rarr; Device IP &rarr; click on the IP address. The Shelly device web page will open, on the left menu click "<> Scripts".
-6. Click the "Create Script".
-7. Open script from the [Github](https://github.com/LeivoSepp/Smart-heating-management-with-Shelly/blob/master/SmartHeatingWithShelly.js).
-8. Click the button "Copy raw file". Now the script content is in your clipboard memory.  
-<img src="images/CopyCode.jpg" alt="Insert code" width="450">
-
-6. Paste the code from the clipboard to the script window **Ctrl+V**.
-1. Name the script, for instance, "Heating 24h-Forecast", and save. 
-2. Click "Start" once the saving process is complete.
-3.  Configure Script parameters
-    - [Using Shelly App Virtual Components](#using-shelly-app)
-    - [Using Shelly KVS](#using-shelly-kvs)
-
-## How to run two instances of this script
-
-If Virtual Components are supported, then the first instance in installed using Virtual Components. All the configuration is done through the Virtual Components.  
-The second instance must be explicitly forced into KVS mode on the same device, as described below.
-
-### How to force script to KVS mode
-
-> [!TIP]
-> This script can be forced to KVS mode even if Virtal Components are available.  
-
-You want to have this in KVS mode in case you have other important scripts already using Virtual Components in the same device.  
-Open the script and set the ManualKVS parameter ``mnKv: true``. Now the script will install in KVS mode.
-
-```js
-let c = {
-    tPer: 24,       // KVS:TimePeriod VC:Heating Period (h) 24/12/6/0
-    hTim: 10,       // KVS:HeatingTime VC:Heating Time (h/period)
-    isFc: false,    // KVS:IsForecastUsed VC:Forecast Heat
-    pack: "VORK2",  // KVS:EnergyProvider VC:Network Package (NONE, VORK1, VORK2, VORK4, VORK5, PARTN24, PARTN24PL, PARTN12, PARTN12PL, PAMATA1, SPECIAL1)
-    lowR: 1,        // KVS:AlwaysOnPrice VC:Heat On (min price) (EUR/MWh)
-    higR: 300,      // KVS:AlwaysOffPrice VC:Heat Off (max price) (EUR/MWh)
-    Inv: false,     // KVS:InvertedRelay VC:Inverted Relay
-    rId: 0,         // KVS:RelayId selects the relay in both modes; required in saved configuration
-    cnty: "ee",     // KVS:Country VC:Market Price Country (ee, fi, lv, lt)
-    hCur: 0,        // KVS:HeatingCurve VC:Heating Curve 
-    tmr: 60,        // Default timer
-    pFac: 0.5,      // Power factor
-    mnKv: false,    // Forcing script to KVS mode (true) or Virtual components mode (false)
-}
-```
-
-## Updating Script
-
-Before upgrading, check the active settings. Supported `TimePeriod` values are **0, 6, 12 and 24**. Earlier versions could use other values, such as 8; this version pauses schedule updates until you choose a supported value. It does not convert 8 to another period. `HeatingTime` is the minimum per period, so review it when changing the period.
-
-In KVS mode, enter numeric settings as JSON numbers (for example, `"HeatingTime": 10`, not `"HeatingTime": "10"`), booleans as `true` or `false`, and supply `Country` (`ee`, `fi`, `lv` or `lt`). The package names are `PARTN24PL` and `PARTN12PL`; the shorter spellings in older Estonian instructions were errors. Invalid values are logged and retained for you to correct. In Virtual Component mode, the nine heating values come from the controls; saved `ManualKVS` and `RelayId` must still be readable and valid. Every saved configuration must include `RelayId` as a non-negative integer; it selects the relay in both KVS and Virtual Component modes. For VC mode, `{ "ManualKVS": false, "RelayId": 0 }` is sufficient. A record containing only `ManualKVS` is rejected; an omitted relay is not silently defaulted to zero. A fresh installation with no configuration key uses the script’s initial `rId` value (0 by default).
-
-The log message **“Schedule updates are paused”** means prices are no longer updating the schedule. A previous schedule may continue repeating its old hours; on a fresh install there may be no schedule. Correct the reported setting or control and the next five-minute retry resumes updates.
-
-Unreleased version **5** removes automatic restoration from backups. The version is recorded for logs and diagnostics; no migration is triggered by the version number. `SmartHeatingVC<ScriptId>` is obsolete: the script never reads or writes it, and you may delete it. Existing controls keep their values.
-
-Virtual Component installation follows these rules. Failed or invalid configuration and SystemData reads pause updates.
+Virtual Component installation depends on the state of the nine required controls. Failed or invalid configuration and SystemData reads pause schedule updates.
 
 | Required controls | Action |
 | --- | --- |
@@ -279,110 +210,95 @@ Virtual Component installation follows these rules. Failed or invalid configurat
 | Some absent | Pause schedule updates and report **“Missing controls”**, naming every missing control, whether SystemData exists or not. |
 | Invalid/conflicting controls or failed/incomplete reads | Pause without changing controls, relay settings or schedules. |
 
-Every inventory page must include a numeric `total`, even when one page contains all nine valid controls. This unreleased version also applies this requirement to normal reads; older code could accept a complete single page without it. A missing or nonnumeric total pauses updates and installation until a valid response arrives. If a listed control exists but is omitted from a response or has no usable value, wait for the next five-minute read. Restore a control manually only if it is actually missing.
+**“Schedule updates are paused”** means the schedule is not being updated. A previous schedule may repeat its old hours; a fresh installation may have no schedule. Correct the reported setting or control. The script retries every five minutes.
 
-If an interrupted installation leaves any of the nine controls missing alongside surviving controls, subsequent calculations and restarts pause for manual recovery. Restore the named controls manually or choose KVS mode using `ManualKVS=true`. To intentionally reinstall defaults, delete all nine required controls and restart. **Keep `SmartHeatingSys<ScriptId>` (SystemData): it holds the schedule ID.** Missing SystemData never authorizes reconstruction of a partial control set. If an add fails before creating any controls, the next calculation can retry because all nine slots are still empty.
+If the log reports an incomplete inventory, heating controls, relay settings and schedules remain unchanged; the script retries the read after five minutes. Restore a control manually only if it is actually missing.
 
-During installation, controls are added first. An absent group is then created once and populated only after its creation is confirmed, followed by a complete control read. If that read still finds a partial set, no second install is attempted in that calculation; the next calculation also pauses until manual recovery. Existing groups retain their names and membership. If a group already exists while all nine control slots are empty, the new controls are not added to that group automatically; group them manually if needed. **“Group setup incomplete”** means grouping needs manual attention; heating can proceed. There are no group retries on later heating calculations or restarts with complete controls. A restart between control creation and grouping can leave the group absent or empty; create or populate it manually if needed.
+If an interrupted installation leaves some controls missing, retries and restarts do not restore them automatically. Restore the named controls manually or [switch to KVS mode](#configuration-using-kvs), preserving your current settings. To intentionally reinstall defaults, delete all nine required controls and restart. **Keep `SmartHeatingSys<ScriptId>` (SystemData): it holds the schedule ID.** Deleting SystemData does not repair a partial set of controls. If no controls were created, the next calculation can retry installation.
 
-A failed SystemData read pauses calculation. A failed write retries the same record before another calculation. A restart or power cut before that write succeeds can still leave an unrecorded schedule. The script uses the recorded ID to manage its schedule; it does not discover or recover orphan schedules. With no recorded ID, it skips schedule listing. After a failed polarity transition, the previous schedule may remain disabled until a successful retry.
+**“Group setup incomplete”** means grouping needs manual attention; heating can proceed. Existing groups retain their names and membership. Create the group or add controls manually if needed, including when a restart left the group absent or empty. Once all controls exist, later calculations and restarts do not retry grouping.
 
-The price feed must contain all 92, 96 or 100 quarter-hour rows for the local day. Historical hourly responses are not supported. At the autumn clock change, the repeated hour uses its first occurrence's price because [Shelly cron runs it only once, at that first occurrence](https://shelly-api-docs.shelly.cloud/gen2/ComponentsAndServices/Schedule/). All quarters of the second occurrence are still validated. The spring day has 23 schedulable hours.
+A failed SystemData write retries the same record before another calculation. A restart or power cut before the write succeeds can leave an unrecorded schedule. The script uses the recorded ID to manage its schedule; it does not discover or recover orphan schedules. After a failed polarity transition, the previous schedule may remain disabled until a successful retry.
 
-> [!WARNING] 
-> Direct upgrade from script version 4.1 to a newer version is not supported due to a change in KVS data format to JSON.  
-> After installation, you must reconfigure all settings either in KVS or via Virtual Components.
+# How to Install this Script
 
-1. Open script from the [Github](https://github.com/LeivoSepp/Smart-heating-management-with-Shelly/blob/master/SmartHeatingWithShelly.js).
-2. Click the button "Copy raw file". Now the script is in your clipboard memory.
+## Installation
 
-<img src="images/CopyCode.jpg" alt="Insert code" width="450">
+1. Obtain a [Shelly Plus, Pro or Gen3 device](https://www.shelly.com/collections/smart-monitoring-saving-energy) that supports scripting.
+2. Connect it to your home network. See the [Shelly web interface guides](https://kb.shelly.cloud/knowledge-base/web-interface-guides).
+3. Open the device web interface through **Settings → Device Information → Device IP**, then select **Scripts → Create Script**.
+4. Open the [script on GitHub](SmartHeatingWithShelly.js) and select **Copy raw file**.
 
-1. Access the Shelly device web page: Navigate to Settings → Device Information &rarr; Device IP &rarr; click on the IP address. The Shelly device web page will open; on the left menu, select "<> Scripts."
-2. Open the script you wish to update.
-3. Select all script code and delete it **Ctrl+A** &rarr; **Delete**. 
-4. Paste the code from the clipboard to the script window **Ctrl+V**.
-5. Save the script, the version is now updated. 
-6. All configurations remain unchanged, as they are stored in KVS or Virtual Components.
+   <img src="images/CopyCode.jpg" alt="Copy the script" width="450">
 
-## How to Verify Script Execution
+5. Paste the code into the script window (**Ctrl+V**), name the script and save it.
+6. For a new installation in KVS mode, set `mnKv: true` before starting, as described in the [KVS instructions](#configuration-using-kvs).
+7. Click **Start**, then configure [Virtual Components](#configuration-using-virtual-components) or [KVS](#configuration-using-kvs).
 
-1. In Shelly app or web page, navigate to "Schedules".
-2. Inspect the scheduled times when the Shelly will be activated.
-3. Schedulers are organized based on the time.
-4. Advanced users can inspect KVS storage: [Advanced → Key Value Storage → Script Data](#advanced--key-value-storage--script-data)
+## How to run two instances of this script
+
+The first instance may use Virtual Components; the second must be explicitly [forced into KVS mode](#configuration-using-kvs) on the same device. Both may use KVS. They can target the same relay or different relays on a device with multiple outputs; select `RelayId` for each instance.
+
+[Shelly permits up to three scripts running at once](https://shelly-api-docs.shelly.cloud/gen2/ComponentsAndServices/Script/). Two heating instances share one watchdog, occupying all three slots. No other script can run alongside them. Also check device memory usage as described above.
+
+## Updating Script
+
+Before upgrading, check the active settings. Supported `TimePeriod` values are **0, 6, 12 and 24**. Earlier versions could use other values, such as 8; this version pauses schedule updates until you choose a supported value. It does not convert 8 to another period. `HeatingTime` is set per period, so review it when changing the period.
+
+Also check the [configuration record](#configuration-using-kvs): use JSON numbers, `true` or `false` for booleans, a supported `Country`, and a non-negative integer `RelayId`. Saved mode and relay settings must be valid even in Virtual Component mode. The package names are `PARTN24PL` and `PARTN12PL`; shorter spellings in older instructions were errors.
+
+Unreleased version **5** removes automatic restoration from backups. The version is recorded for logs and diagnostics; no migration is triggered by the version number. `SmartHeatingVC<ScriptId>` is obsolete: the script never reads or writes it, and you may delete it. Existing controls keep their values.
+
+> [!WARNING]
+> Direct upgrade from version 4.1 is not supported because the KVS format changed to JSON. After installation, reconfigure all settings in KVS or Virtual Components.
+
+1. Open the [script on GitHub](SmartHeatingWithShelly.js) and select **Copy raw file**.
+2. Open the device web interface through **Settings → Device Information → Device IP**, then select **Scripts**.
+3. Open the script to update, select all code (**Ctrl+A**) and delete it.
+4. Paste the new code (**Ctrl+V**) and save.
+5. Settings stored in KVS or Virtual Components remain saved. Check them against the requirements above and [inspect the schedule](#monitoring-and-editing-the-schedule).
+
+For installation problems, see [Virtual Component recovery](#virtual-component-installation-and-recovery).
 
 ## How the Script Operates
 
-1. Internet Connection: 
-    * The script needs the internet to download daily electricity prices and weather forecasts.
-2. Daily Operation:
-    * It runs every day after 23:00 or as needed during the day to set up heating times.
-3. Workflow:
-    * The script follows a flowchart to determine the best heating hours based on market prices and weather forecasts.
+The script needs internet access for [Elering prices](https://dashboard.elering.ee/assets/api-doc.html#/nps-controller/getPriceUsingGET) and, when enabled, the [Open-Meteo forecast](https://open-meteo.com/en/docs). It calculates a schedule at startup and refreshes after 23:00; shorter forecast periods also refresh before the next heating period.
+
+The price feed must contain all 92, 96 or 100 quarter-hour rows for the local day. Historical hourly responses are not supported. At the autumn clock change, the repeated hour uses its first occurrence's price because [Shelly cron runs it only once, at that first occurrence](https://shelly-api-docs.shelly.cloud/gen2/ComponentsAndServices/Schedule/). All quarters of the second occurrence are still validated. The spring day has 23 schedulable hours.
+
+The running watchdog handles heating-script stop and deletion events:
 
 ```mermaid
 flowchart TD
-    0[Start] --> A
-    A[Get Shelly time and location] --> K{Is forecast used?}
-    K -- Yes --> B{Get forecast <br> from Open-Meteo.com API}
-    B -- Succeeded </br>Calculate heating time --> D{Get market price <br> from Elering API}
-    K -- No --> D
-    B --> M@{ shape: subproc, label: "Failed</br>Check again in 5 minute" }
-    D -- Succeeded</br>Calculate heating schedules --> L{Check, if market price and </br> forecast needs update}
-    D --> M
-    L --> M
-    L -- Yes</br>Start the script --> 0
+    A[Heating script stops or is deleted] --> B[Watchdog reads SystemData]
+    B --> C{Recorded schedule ID exists?}
+    C -- Yes --> D[Delete schedule with the recorded ID]
+    D --> E{Deletion succeeded?}
+    E -- Yes --> F[Save ExistingSchedule as 0]
 ```
-
-4. Watchdog workflow
-
-```mermaid
-flowchart TD
-    0[Start] --> A
-    A[Create 'watchdog' </br>event handler] --> K{Is heating script </br>stopped or deleted?}
-    K -- Yes --> B[Find the script schedule</br>and delete it]
-```
-
 
 ## Important To Know
 
-* <p>When the script is stopped, the schedule is deleted. Shelly only follows the heating algorithm when the script is running.</p>
-* <p>Two script instances can run in parallel, however, if the first is in Virtual Components mode, then the second instance must be explicitly forced into KVS mode on the same device.</p>
-* <p>Up to two instances of this script can run concurrently in KVS mode, both employing different algorithm. These instances can either operate with the same switch output using Shelly Plus 1 or use different switch outputs, as supported by devices like Shelly Plus 2PM.</p>
-* <p>This script creates a special "watchdog" script. This "watchdog" script ensures proper cleanup when the heating script is stopped or deleted.</p>
-* <p>To mitigate the impact of internet outages, this script uses parameter ``heating time`` to turn on heating based on historically cheap hours.</p>
-* <p>The "Run on startup" button for this script must be activated. This setting ensures that the script starts after a power outage, restart, or firmware update.</p>
-* <p>This script exclusively handles scheduler generated by its own processes. This script is designed to delete only the scheduler that it has created.</p>
-* <p>This solution will only have benefits if you have an hourly priced energy contract. If your energy contract features a flat rate, this solution will not contribute to reducing your energy bill.</p>
-* This script depends on the internet and these two services:
-    * Electricity market price from [Elering API](https://dashboard.elering.ee/assets/api-doc.html#/nps-controller/getPriceUsingGET),
-    * Weather forecast from [Open-Meteo API](https://open-meteo.com/en/docs).
-* Use firmware 1.4.4 or newer for these installation instructions. The script’s existing capability check accepts Virtual Components on Gen2 Pro from 1.4.3, and on Gen3/Gen4 by generation; that check is not a full firmware compatibility test.
-<br>
+- The script attempts to enable autostart for itself and the watchdog. After a firmware update, check that **Run on startup** is enabled for both.
+- When the heating script stops or is deleted, the running watchdog removes its recorded schedule. Watchdog installation or deletion failures are logged; stopping the heating script alone does not confirm schedule deletion.
+- The script manages its schedule through the ID in SystemData. Preserve that record, including when restoring controls.
 
 ## Tested Failure Scenarios
 
-With `TimePeriod: 0` (threshold-only mode), unavailable prices pause schedule updates and preserve the existing schedule and relay configuration. No historical-hour fallback is defined for this mode. Valid prices resume threshold-based scheduling; the offline fallback for a timed period with zero requested hours still clears the schedule.
-In timed-period modes, during any of the failures below, Shelly uses the ``Heating Time`` duration to turn on heating based on historically cheap hours.
-
-In error mode, Shelly divides the heating time bsaed on the configured periods.
-
-**Failure scenarios:**
-1. Shelly is working, but the internet goes down due to a home router crash or internet provider malfunction. Shelly time continues running.
-2. After a power outage, the internet is not working, and Shelly has no time.
-3. Elering HTTP error occurs, and the Elering server is not reachable.
-4. Elering API failure happens, and the service is down.
-5. Elering API returns incorrect data, and prices are missing.
-6. Weather forecast HTTP error occurs, and the server is unavailable.
-7. Weather forecast API service error occurs, and the JSON data is not received.
+- When prices or a required forecast are unavailable in a timed mode, the script uses historically cheaper fallback hours based on `HeatingTime`. With `HeatingTime: 0`, this removes the heating schedule.
+- In threshold-only mode (`TimePeriod: 0`), unavailable prices pause updates. The existing schedule and relay settings remain; there is no historical-hour fallback.
+- Failed configuration or SystemData reads log **“Schedule updates are paused”** and leave heating controls, relay settings and schedules unchanged.
+- After a power cut, the script waits about 30 seconds for device time. If time is still unavailable, timed modes use the fallback above; threshold-only mode pauses updates.
+- When device time synchronizes, the script retries calculation. Failed requests are retried at five-minute intervals.
 
 # Smart Heating for Thermia Villa & Eko Classic Using Shelly
 
-Thermia Villa and Thermia Eko Classic are two old but still widely used ground heating systems.  
+Check the wiring against the installer manual of your heat pump.
+
+Thermia Villa and Thermia Eko Classic are two old but still widely used ground heating systems.
 This guide explains how to make these heat pumps smart using two Shelly devices.
 
-Step-by-Step Instructions  
+Step-by-Step Instructions
 (Including installer manual screenshots for reference.)
 
 |Thermia Villa|Thermia Eko Classic|
@@ -393,7 +309,7 @@ Connect **two Shelly devices** inside the heat pump following the **schema below
 
  <img src="images/ThermiaShelly.jpg" alt="Connect Thermia and Shelly" width="500">
 
-Refer to the table below for **configuring the Shelly devices**.  
+Refer to the table below for **configuring the Shelly devices**.
 Both Shelly devices must have Smart Heating script. Configure them according to heating or hot water production.
 
 |Heatpump|Heating+Hot Water|only Hot Water|
@@ -405,32 +321,17 @@ Below is the **heat pump operating guide** for reference.
 
 |Thermia Villa|Thermia Eko Classic|Shelly 1|Shelly 2|
 |---|---|---|---|
-|EVU Stop <br>No heating or hot water|Hot water <br> Reduced Temperatur|On|On|
-|Hot Water<br> Reduced Temperatur|EVU Stop<br>No heating or Hot water|On|Off|
+|EVU Stop <br>No heating or hot water|Hot water <br> Reduced Temperature|On|On|
+|Hot Water<br> Reduced Temperature|EVU Stop<br>No heating or Hot water|On|Off|
 |Normal heating <br>Normal Hot water|Normal heating <br>Normal Hot water|Off|On|
 |Normal heating <br>Normal Hot water|Normal heating <br>Normal Hot water|Off|Off|
 
 # Smart Heating Algorithms
 
+<a name="advantages-of-weather-forecast-based-heating"></a>
 ## Weather Forecast Algorithm
 
-> [!TIP]
-> This algorithm calculates the heating time for the next day based on weather forecasts.  
-> It is particularly effective for various home heating systems. This approach optimizes energy usage by aligning heating needs with anticipated weather conditions.
-
-### Advantages of Weather Forecast-Based Heating
-
-* Temperature Responsiveness:
-
-When the outside temperature is a mild +17 degrees Celsius, no heating is necessary. Conversely, as the temperature drops to -5 degrees Celsius, there is a need for some heating, and for extremely cold conditions like -20 degrees Celsius, significant amount of heating is required. 
-
-* Smart Heating Management:
-
-Utilizing weather forecasts allows for smart and adaptive heating management. The system will proactively adjust heating times based on the outside temperature, creating a responsive and dynamic heating schedule.
-
-* Location-Specific Forecast:
-
-To provide accurate weather forecasts, location data is necessary. This enables the system to deliver precise predictions for your home's climate, allowing for a customized and effective heating strategy. 
+Forecast mode adjusts heating time using the apparent-temperature forecast for the upcoming period. Above +16 °C, the algorithm sets forecast heating demand to zero: at +17 °C it is zero, at −5 °C higher, and at −20 °C higher still. Actual hours also depend on the heating curve, minimum and price thresholds.
 
 ### Shelly Geolocation
 
@@ -441,27 +342,24 @@ Note: Shelly's location is determined based on your internet provider's IP addre
 
 ### Heating Curve
 
-The relationship between temperature and heating time is known as the *heating curve*.
+`HeatingCurve` lets you adjust demand for your building's insulation. The calculation uses Open-Meteo apparent temperatures:
 
-Heating time is influenced by the insulation of your household. For instance, an old and uninsulated house may require 10 hours of heating at -5 degrees, whereas a new A-class house might only need 6 hours.
+1. `T` is the mean forecast apparent temperature, rounded up.
+2. Daily demand in hours = `(16 − T) × pFac + 2 × HeatingCurve − 2`. `pFac` defaults to `0.5` and is set in the script.
+3. If `T > 16` or the result is negative, daily demand is `0`.
+4. Divide daily demand by the number of periods (`24 / TimePeriod`) and round down.
+5. When daily demand is positive, raise the result to `HeatingTime` if it is below that minimum.
+6. Cap the result at the period length.
 
-To account for these differences, the script includes the parameter ``heatingCurve``, allowing users to customize the heating curve based on their specific household characteristics.
+The graphs use `pFac: 0.5`, `HeatingTime: 0`, and `HeatingCurve` values from −4 to 8. Hours are rounded down and capped at the period length. A configured minimum can increase hours when demand is positive; price thresholds apply afterwards.
 
-* 24 hour period graph represents visually how heating time varies with outside temperature and the ``heatingCurve`` parameter which shifts the heating curve to the left or right, whereas shifting 1 equals 1h. The Shelly device has a maximum limit of 20 schedulers, representing the maximum heating hours the script can manage within a 24-hour period. If more heating hours are needed, the script employs a 12-hour algorithm.
+<img src="images/HeatingCurve24.png" alt="Forecast heating hours per 24-hour period" width="750">
 
-<img src="images/HeatingCurve24.jpg" alt="Heating curve for 24h period" width="750">
-
-____
-
-* 12 hour period graph represents visually how heating time varies with outside temperature and the ``heatingCurve`` parameter.
-
-<img src="images/HeatingCurve12.jpg" alt="Heating curve for 12h period" width="750">
-
-For those interested in the mathematical aspect, the linear equation used to calculate heating time is: ``(Temperature Forecast) * PowerFactor + (Temperature Forecast + heatingCurve)``.
+<img src="images/HeatingCurve12.png" alt="Forecast heating hours per 12-hour period" width="750">
 
 ## Time Period Algorithm
 
-> This algorithm divides heating into distinct time periods, activating heating during the most cost-effective hours within each period. It is well-suited for use cases such as hot water boilers, where usage is contingent on the household size rather than external temperature. This method optimizes energy efficiency by aligning heating with periods of lower energy costs.
+> This algorithm divides heating into distinct time periods, activating heating during the most cost-effective hours within each period. It is well-suited for use cases such as hot water boilers, where usage is contingent on the household size rather than external temperature. Choose the period length and heating hours to suit the household’s needs.
 
 Within each heating period, hours with equal calculated prices, including transmission fees, are selected latest first; always-on and always-off rules still apply.
 
@@ -469,22 +367,16 @@ Within each heating period, hours with equal calculated prices, including transm
 
 <img src="images/Heating24_10.jpg" alt="Heating period 24h" width="750">
 
-___
-
-* A 4-hour graph with 1 heating hours visually shows how the most affordable time for heating is chosen during each of the 4h-period. The red bar represents heating hour within the period.
-
-<img src="images/Heating4_1.jpg" alt="Heating period 24h" width="750">
-
-</br>
-
 # Does it Truly Reduce My Electric Bills
-In short: yes.
 
-Here's a more detailed explanation. While your overall daily electric consumption remains the same, this script optimizes the activation of your heating devices for the most economical hours. Consequently, even with the same energy consumption, your electricity bill is reduced.
+Savings depend on the installation and electricity contract. This approach is most useful when:
 
-Appliances like water heaters, water tanks, ground-source or air-source heat pumps, electric radiators, underfloor electric heaters, and air conditioning are examples of energy-intensive devices that benefit from being activated during the most cost-effective times of the day.
+- you have a spot-price electricity contract;
+- heating can be shifted to cheaper hours;
+- enough heat or hot water is stored between heating periods;
+- the selected transmission package matches your contract, because fees can change the hour ranking.
 
-Electricity prices can fluctuate significantly, sometimes varying up to 100 times during a day. Check electricity market prices for more information. https://dashboard.elering.ee/et/nps/price
+A lower bill or unchanged energy consumption is not guaranteed. Assess the result using your consumption, costs and comfort. See [Elering's price dashboard](https://dashboard.elering.ee/et/nps/price).
 
 # Troubleshooting
 
@@ -510,26 +402,6 @@ If accessing the device web page is not feasible, follow these steps on the Shel
     If any issues arise during this process, you can repeat the workaround by starting from the script deletion step.
 
 <img src="images/CouldntGetScript.jpg" alt="Couldn't get script." width="750">
-
-## Advanced &rarr; Key Value Storage &rarr; Script Data
-
-The script saves data in Shelly KVS (Key-Value-Storage) to preserve it in case of power outages or restarts.
-
-To access the stored data on the Shelly device web page, navigate to **Advanced &rarr; KVS**.
-
-2. Key: ``LastCalculation`` Value: ``Fri Dec 27 2024 23:29:20 GMT+0200`` 
-   
-   This timestamp indicates the time when the script successfully retrieved market prices from Elering and created schedules. While this information is primarily for your reference, it offers insights into the timeline of script activities.
-
-1. Key: ``ExistingSchedule`` Value: ``1``
-   
-    The numeric values represent schedule ID number created by the script. This information is crucial for each script to identify and manage schedule associated with it. It aids in the proper deletion of outdated schedules when creating new ones is necessary.
-
-3. Key: ``Version`` Value: ``4.3`` 
-   
-   The version indicates the installed script version.
-
-<img src="images/KvsSystem.jpg" alt="Key Value Storage" width="750">
 
 # License
 

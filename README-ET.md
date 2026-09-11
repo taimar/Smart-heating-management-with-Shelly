@@ -1,11 +1,11 @@
-# Nutikas ja odav börsihinna järgi kütmine Shellyga 
+# Nutikas ja odav börsihinna järgi kütmine Shellyga
 
 > [!TIP]
-> See Shelly skript tagab kütteseadme töö kõige odavamate tundide ajal, kasutades elektri börsihindu ja erinevaid algoritme.
+> Skript valib küttetunnid Eleringi börsihindade, määratud kütteperioodide ja soovi korral ilmaprognoosi põhjal.
 
 > [!IMPORTANT]
 > Alates 1. oktoobrist 2025 kasutab Elering 15-min elektrihinda, mis tähendab, et nende API struktuur on muutunud. Et sinu Shelly automatiseerimine töötaks edasi, pead:
-> 
+>
 > ✅ Uuendama oma Shelly skripti
 >
 > * Minimaalne nõutud versioon: 4.8 või uuem
@@ -14,16 +14,13 @@
 > [!IMPORTANT]
 > Veerandtunni hindade vastuses on neli korda rohkem ridu kui tunnihindade vastuses. Selle versiooni maksimaalset mälukasutust ei ole Shelly seadmel mõõdetud. Enne mitme skripti kasutamist kontrolli oma seadmel `mem_used` ja `mem_peak` väärtusi.
 
-
 - [Nutikas ja odav börsihinna järgi kütmine Shellyga](#nutikas-ja-odav-börsihinna-järgi-kütmine-shellyga)
   - [Põhifunktsioonid](#põhifunktsioonid)
-  - [Jälgimine ja ajakava muutmine](#jälgimine-ja-ajakava-muutmine)
-  - [Kuidas kontrollida ajakava](#kuidas-kontrollida-ajakava)
+  - [Ajakava jälgimine ja muutmine](#ajakava-jälgimine-ja-muutmine)
   - [Skripti parameetrite konfigureerimine](#skripti-parameetrite-konfigureerimine)
-    - [Skripti Virtual Componentide häälestamine](#skripti-virtual-componentide-häälestamine)
-    - [Kuidas panna skript tööle KVS-modes](#kuidas-panna-skript-tööle-kvs-modes)
+    - [Virtuaalkomponentide häälestamine](#virtuaalkomponentide-häälestamine)
     - [Skripti KVS häälestamine](#skripti-kvs-häälestamine)
-      - [Heating parameters](#heating-parameters)
+      - [Kütteparameetrid](#kütteparameetrid)
       - [``"EnergyProvider": "VORK1"``](#energyprovider-vork1)
       - [``"AlwaysOnPrice": 10``](#alwaysonprice-10)
       - [``"AlwaysOffPrice": 300``](#alwaysoffprice-300)
@@ -31,237 +28,183 @@
       - [``"RelayId": 0``](#relayid-0)
       - [``"Country": "ee"``](#country-ee)
       - [``"HeatingCurve": 0``](#heatingcurve-0)
+    - [Virtuaalkomponentide paigaldamine ja taastamine](#virtuaalkomponentide-paigaldamine-ja-taastamine)
 - [Kuidas seda skripti installida](#kuidas-seda-skripti-installida)
   - [Paigaldamine](#paigaldamine)
   - [Kuidas panna tööle kaks installatsiooni](#kuidas-panna-tööle-kaks-installatsiooni)
-    - [Kuidas panna skript tööle KVS-modes](#kuidas-panna-skript-tööle-kvs-modes-1)
   - [Skripti uuendamine](#skripti-uuendamine)
-  - [Kuidas kontrollida et skript töötab](#kuidas-kontrollida-et-skript-töötab)
   - [Kuidas skript töötab](#kuidas-skript-töötab)
   - [Oluline teada](#oluline-teada)
   - [Testitud rikkestsenaariumid](#testitud-rikkestsenaariumid)
-- [Maasoojuspumpade Thermia Villa \& Eko Classic nutikas kütmine Shelly abil](#maasoojuspumpade-thermia-villa--eko-classic-nutikas-kütmine-shelly-abil)
+- [Maasoojuspumpade Thermia Villa & Eko Classic nutikas kütmine Shelly abil](#maasoojuspumpade-thermia-villa--eko-classic-nutikas-kütmine-shelly-abil)
 - [Nutikad kütte algoritmid](#nutikad-kütte-algoritmid)
   - [Ilmaprognoosi algoritm](#ilmaprognoosi-algoritm)
-    - [Ilmaprognoosipõhise kütmise eelised](#ilmaprognoosipõhise-kütmise-eelised)
     - [Shelly geograafiline asukoht](#shelly-geograafiline-asukoht)
     - [Küttegraafik](#küttegraafik)
   - [Ajaperioodi algoritm](#ajaperioodi-algoritm)
 - [Kas see tõesti vähendab minu elektriarveid](#kas-see-tõesti-vähendab-minu-elektriarveid)
 - [Tõrkeotsing](#tõrkeotsing)
   - [Viga "Couldn't get script"](#viga-couldnt-get-script)
-  - [Advanced → Key Value Storage → Script Data](#advanced--key-value-storage--script-data)
 - [Litsents](#litsents)
 - [Autor](#autor)
 
+## Põhifunktsioonid
 
-## Põhifunktsioonid 
-1. **Ilmaennustusega odavad tunnid**: Järgmise päeva küttetunnid on optimeeritud ilmaprognoosi ja energiahindade põhjal. 
-2. **Fikseeritud odavad tunnid**: Jaota päev ajaperioodideks (6, 12 või 24) ja aktiveeri küte iga perioodi kõige odavama(te)l tundidel. 
-3. **Hinnatasemete kasutamine**: Kasuta min ja max hinnaläve, et hoida Shelly süsteem sellest lähtuvalt ka sees või väljas. 
+1. **Ilmaprognoosiga küte:** arvutab küttetundide arvu prognoositava tajutava temperatuuri järgi.
+2. **Fikseeritud kütteperioodid:** valib odavaimad tunnid iga 6-, 12- või 24-tunnise perioodi sees.
+3. **Hinnapiirid:** lisab või välistab küttetunde määratud börsihinna lävendite järgi.
+4. **Kaks skripti ühel seadmel:** võimaldab juhtida eri küttevajadusi; vaata [kahe installatsiooni juhiseid](#kuidas-panna-tööle-kaks-installatsiooni).
 
-**Käivituse ajakava**: Skript töötab iga päev pärast 23:00 või vajadusel päeva jooksul, et arvutada järgmise perioodi või päeva küttetunnid. 
+<a name="jälgimine-ja-ajakava-muutmine"></a>
+<a name="kuidas-kontrollida-ajakava"></a>
+<a name="kuidas-kontrollida-et-skript-töötab"></a>
+<a name="advanced--key-value-storage--script-data"></a>
+## Ajakava jälgimine ja muutmine
 
-## Jälgimine ja ajakava muutmine 
+Skript kasutab üht ajakava, mis sisaldab kõiki valitud küttetunde.
 
-> [!NOTE]
-> Alates skriptiversioonist 3.9 (jaanuar 2025) loob see skript ühe ajakava, mis sisaldab kõiki vajalikke küttetunde. 
+1. Ava Shelly rakenduses või seadme veebilehel **Schedules**.
+2. Ava skripti ajakava ja klõpsa **Time**, et näha valitud tunde.
 
-## Kuidas kontrollida ajakava 
-Skripti loodud küttetundide vaatamiseks: 
-1. Avage Shelly ajakava (Schedule). 
-2. Klõpsake **Time**, et näha täielikku kütteseadme ajakava. 
+| Ava ajakava | Vaata ja muuda tunde |
+| --- | --- |
+| <img src="images/oneschedule.jpg" alt="Ava ajakava" width="200"> | <img src="images/editschedule.jpg" alt="Muuda küttetunde" width="200"> |
 
-|||
-|-|-| 
-|<img src="images/oneschedule.jpg" alt="Open Schedule" width="200">|<img src="images/editschedule.jpg" alt="Open Schedule" width="200">| 
+Tundide käsitsi lisamiseks või eemaldamiseks klõpsa neile ja vali **Next → Next → Save**. Muudatused kehtivad kuni skript asendab ajakava järgmise arvutuse järel.
 
-> [!TIP] 
-> Saate ajakava käsitsi muuta, klõpsates mis tahes tunnil, et see lisada või eemaldada, seejärel klõpsake Next &rarr; Next &rarr; Save.  
-> Järgmine kord kui skript arvutab uue ajakava, kirjutatakse kõik käsitsi loodudmuudatused üle. 
+Seadme veebilehel **Advanced → KVS** asub üks JSON-kirje `SmartHeatingSys<ScriptId>`, näiteks `SmartHeatingSys1` skripti ID 1 jaoks:
 
-**Kuidas jälgida skripti käivitumist**   
-Andmeväli ``LastCalculation`` KVS-is värskendatakse iga kord, kui Eleringist on saadud uued elektrihinnad ja genereeritakse järgmise perioodi ajakava.  
-Andmeväli ``ExistingSchedule`` KVS-s on antud skripti poolt loodud schedule ID.
+| Väli | Tähendus |
+| --- | --- |
+| `ExistingSchedule` | Skripti ajakava salvestatud ID; `0` tähendab, et ajakava pole salvestatud. |
+| `LastCalculation` | Viimase salvestatud ajastamistulemuse ajatempel. |
+| `Version` | Kirje salvestanud kütteskripti versioon. |
 
-## Skripti parameetrite konfigureerimine 
+`LastCalculation` märgib hinnapõhise ajakava, varuajakava, küttetundideta tulemuse või ajakava loomise ebaõnnestumise aega. Salvestamise korduskatsetel ajatempel ei muutu: see näitab tulemuse, mitte hilisema salvestamise aega. See ei kinnita edukat hindade päringut ega tegelikku kütmist.
 
-### Skripti Virtual Componentide häälestamine
-> [!TIP]
-> See skript kasutab **Virtuaalseid Komponente**, mis võimaldab kõiki seadeid hallata otse Shelly Cloud veebilehelt või mobiilirakendusest.  
+Pärast kütte ajakava edukat kustutamist seab watchdog `ExistingSchedule` väärtuseks `0`, jättes `LastCalculation` muutmata.
 
-Virtuaalseid komponente toetatakse Shelly Gen 2 Pro seadmetes ja kõigis Gen 3 ja uuemates seadmetes. 
+<img src="images/KvsSystem.jpg" alt="SystemData väljad ühes KVS-i JSON-kirjes" width="750">
 
-<img src="images/ShellyVirtualComponents.jpg" alt="Shelly KVS" width="700"> 
+## Skripti parameetrite konfigureerimine
 
-### Kuidas panna skript tööle KVS-modes
+<a name="skripti-virtual-componentide-häälestamine"></a>
+### Virtuaalkomponentide häälestamine
 
-> [!TIP]
-> See skript võib käia ka KVS-modes isegi kui Virtuaalsed Komponendid on saadaval.
+Virtuaalkomponendid võimaldavad muuta üheksat kütteseadet Shelly rakenduses. `RelayId` valitakse mõlemas režiimis KVS-kirjes.
 
-Seda häälestust on vaja juhul, kui antud Shelly seadme peal on juba mõni teine skript mis kasutab Virtuaalseid Komponente.
-Ava skript ja pane ManualKVS parameeter ``mnKv: true``. Peale seda installeerub skript KVS-modes.
+Skript valib virtuaalkomponentide režiimi Gen2 Pro seadmetel alates püsivarast 1.4.3 ning Gen3/Gen4 seadmetel põlvkonna järgi, kui KVS-režiim pole käsitsi valitud. Paigaldusjuhend eeldab püsivara 1.4.4 või uuemat; see režiimi valiku kontroll ei ole täielik ühilduvustest.
 
-```js
-let c = {
-    tPer: 24,       // KVS:TimePeriod VC:Heating Period (h) 24/12/6/0
-    hTim: 10,       // KVS:HeatingTime VC:Heating Time (h/period)
-    isFc: false,    // KVS:IsForecastUsed VC:Forecast Heat
-    pack: "VORK2",  // KVS:EnergyProvider VC:Network Package (NONE, VORK1, VORK2, VORK4, VORK5, PARTN24, PARTN24PL, PARTN12, PARTN12PL, PAMATA1, SPECIAL1)
-    lowR: 1,        // KVS:AlwaysOnPrice VC:Heat On (min price) (EUR/MWh)
-    higR: 300,      // KVS:AlwaysOffPrice VC:Heat Off (max price) (EUR/MWh)
-    Inv: false,     // KVS:InvertedRelay VC:Inverted Relay
-    rId: 0,         // KVS:RelayId selects the relay in both modes; required in saved configuration
-    cnty: "ee",     // KVS:Country VC:Market Price Country (ee, fi, lv, lt)
-    hCur: 0,        // KVS:HeatingCurve VC:Heating Curve 
-    tmr: 60,        // Default timer
-    pFac: 0.5,      // Power factor
-    mnKv: false,    // Forcing script to KVS mode (true) or Virtual components mode (false)
+<img src="images/ShellyVirtualComponents.jpg" alt="Shelly virtuaalkomponendid" width="700">
+
+<a name="kuidas-panna-skript-tööle-kvs-modes"></a>
+<a name="kuidas-panna-skript-tööle-kvs-modes-1"></a>
+### Skripti KVS häälestamine
+
+KVS-režiimis ava seadme veebilehel **Advanced → KVS**. Seaded asuvad JSON-kirjes `SmartHeatingConf<ScriptId>`, näiteks `SmartHeatingConf1` skripti ID 1 jaoks. KVS-režiimi saab kasutada ka virtuaalkomponentidega seadmel, näiteks teise kütteskripti jaoks.
+
+- **Uus paigaldus:** määra [skriptis](SmartHeatingWithShelly.js) enne esimest käivitamist `mnKv: true`. Esimesel seadistuse salvestamisel saab sellest `ManualKVS` väärtus.
+- **Olemasolev KVS-paigaldus:** säilita kogu seadistuskirje, sea `ManualKVS` väärtuseks `true` ja taaskäivita skript. Salvestatud tõeväärtus on skripti algväärtusest ülimuslik.
+- **Üleminek virtuaalkomponentidelt:** kirje võib sisaldada vaid `{ "ManualKVS": false, "RelayId": 0 }`. KVS-režiim nõuab lisaks relee ID-le kõiki üheksat kütteseadet. Kopeeri juhtkomponentide praegused väärtused KVS-kirjesse, säilita `RelayId`, sea `ManualKVS` väärtuseks `true` ja taaskäivita skript.
+
+Olemasolevad virtuaalkomponendid jäävad seadmesse alles, kuid nende väärtuste muutmine rakenduses ei mõjuta kütmist, kui skript töötab KVS-režiimis.
+
+Näidiskonfiguratsioon: kohanda väärtused oma paigaldusele. Virtuaalkomponentidelt üleminekul kasuta nende praeguseid väärtusi.
+
+```json
+{
+  "TimePeriod": 24,
+  "HeatingTime": 10,
+  "IsForecastUsed": false,
+  "EnergyProvider": "VORK2",
+  "AlwaysOnPrice": 1,
+  "AlwaysOffPrice": 300,
+  "InvertedRelay": false,
+  "RelayId": 0,
+  "Country": "ee",
+  "HeatingCurve": 0,
+  "ManualKVS": true
 }
 ```
 
-### Skripti KVS häälestamine
-
-Kui skript on **KVS-modes**, saab seadeid muuta seadme veebilehe kaudu, kasutades selle IP-aadressi: Menu → Advanced → KVS.  
-Kõik kasutaja häälestused asuvad JSON formaadis parameetri ``SmartHeatingConf`` all.
-
-> [!IMPORTANT]
-> Alates versioonist 4.2, hoitakse KVS-s andmeid JSON formaadis.  
-> See aitab kaasa paremale mäluhaldusele, muuda Shelly töö stabiilsemaks ning võimaldab mitu samaaegset installatsiooni.
+Arvud sisesta JSON-arvudena (`10`), tõeväärtused kujul `true` või `false`. Igas salvestatud konfiguratsioonis peab `RelayId` olema mittenegatiivne täisarv; puuduvat väärtust ei asendata nulliga. Uuel paigaldusel kasutatakse skripti algset `rId` väärtust (vaikimisi `0`). Vigased seaded jäetakse parandamiseks alles.
 
 <img src="images/kvsConfigSettings.jpg" alt="Shelly KVS" width="550">
 
-<img src="images/kvsConfigSettingsJson.jpg" alt="Shelly KVS" width="550">
+<img src="images/kvsConfigSettingsJson.jpg" alt="JSON configuration in KVS" width="550">
 
-#### Heating parameters
+<a name="heating-parameters"></a>
+#### Kütteparameetrid
 
-```
-"TimePeriod": 24,
-"HeatingTime": 10,
-"IsForecastUsed": true,
-``` 
-
-Vaata küttereziimide osas alltoodud tabelit.
-
-> Küttereziime saate kohandada viisil, et need sobiksid teie isiklike eelistuste ja konkreetsete olukordadega.
+`TimePeriod` toetatud väärtused on **0, 6, 12 ja 24**. Prognoosita määrab `HeatingTime` valitavate tundide arvu perioodis; prognoosiga on see miinimum, mida rakendatakse ainult positiivse küttevajaduse korral. Hinnapiirid võivad valitud tundide arvu muuta. Tabeli kasutusnäited on lähtepunkt seadistamiseks.
 
 | Kütte režiim | Kirjeldus | Parim kasutus |
 | --- | --- | --- |
-| ``TimePeriod": 24,``<br>``"HeatingTime": 10,`` <br>``"IsForecastUsed": true`` | Kütmise aeg **24-tunnise** perioodi kohta sõltub **välistemperatuurist**. | Betoonpõranda kütmine või suur veepaak, mis suudab hoida soojusenergiat vähemalt 10–15 tundi. |
-| ``TimePeriod": 12,``<br>``"HeatingTime": 5,``<br>``"IsForecastUsed": true`` | Kütmise aeg iga **12-tunnise** perioodi kohta sõltub **välistemperatuurist**. | Kipsivalu põrandaküte või veepaak, mis suudab hoida soojusenergiat 5–10 tundi. |
-| ``TimePeriod": 6,``<br>``"HeatingTime": 2,``<br>``"IsForecastUsed": true`` | Kütmise aeg iga **6-tunnise** perioodi kohta sõltub **välistemperatuurist**. | Õhk-soojuspumbad, radiaatorid või põrandaküttesüsteemid väikese veepaagiga, mis suudab hoida energiat 3–6 tundi. |
-| ``TimePeriod": 24,``<br>``"HeatingTime": 20,``<br>``"IsForecastUsed": false`` | Küte on aktiveeritud **20** kõige odavamal tunnil päevas. | Näiteks ventilatsioonisüsteem. |
-| ``TimePeriod": 24,``<br>``"HeatingTime": 12,``<br>``"IsForecastUsed": false`` | Küte on aktiveeritud **12** kõige odavamal tunnil päevas. | Suur veepaak 1000L või rohkem. |
-| ``TimePeriod": 12,``<br>``"HeatingTime": 6,``<br>``"IsForecastUsed": false`` | Küte on aktiveeritud **kuuel** kõige odavamal tunnil igas **12-tunnises** perioodis. | Suur veepaak 1000L või rohkem, suure kasutusega. |
-| ``TimePeriod": 12,``<br>``"HeatingTime": 2,``<br>``"IsForecastUsed": false`` | Küte on aktiveeritud **kahel** kõige odavamal tunnil igas **12-tunnises** perioodis. | Väike 150L veeboiler väikesele majapidamisele. |
-| ``TimePeriod": 6,``<br>``"HeatingTime": 2,``<br>``"IsForecastUsed": false`` | Küte on aktiveeritud **kahel** kõige kulutõhusamal tunnil igas **6-tunnises** perioodis. | Suur 200L veeboiler neljale või enamale inimesele mõeldud majapidamisele. |
-| ``TimePeriod": 0,``<br>``"HeatingTime": 0,``<br>``"IsForecastUsed": false`` | Küte on aktiveeritud ainult tundidel, kui elektri börsihind on madalam kui määratud ``alwaysOnLowPrice``. |
+| ``"TimePeriod": 24,``<br>``"HeatingTime": 10,`` <br>``"IsForecastUsed": true`` | Kütmise aeg **24-tunnise** perioodi kohta sõltub **prognoositud tajutavast temperatuurist**. | Betoonpõranda kütmine või suur veepaak, mis suudab hoida soojusenergiat vähemalt 10–15 tundi. |
+| ``"TimePeriod": 12,``<br>``"HeatingTime": 5,``<br>``"IsForecastUsed": true`` | Kütmise aeg iga **12-tunnise** perioodi kohta sõltub **prognoositud tajutavast temperatuurist**. | Kipsivalu põrandaküte või veepaak, mis suudab hoida soojusenergiat 5–10 tundi. |
+| ``"TimePeriod": 6,``<br>``"HeatingTime": 2,``<br>``"IsForecastUsed": true`` | Kütmise aeg iga **6-tunnise** perioodi kohta sõltub **prognoositud tajutavast temperatuurist**. | Õhk-soojuspumbad, radiaatorid või põrandaküttesüsteemid väikese veepaagiga, mis suudab hoida energiat 3–6 tundi. |
+| ``"TimePeriod": 24,``<br>``"HeatingTime": 20,``<br>``"IsForecastUsed": false`` | Küte on aktiveeritud **20** kõige odavamal tunnil päevas. | Näiteks ventilatsioonisüsteem. |
+| ``"TimePeriod": 24,``<br>``"HeatingTime": 12,``<br>``"IsForecastUsed": false`` | Küte on aktiveeritud **12** kõige odavamal tunnil päevas. | Suur veepaak 1000L või rohkem. |
+| ``"TimePeriod": 12,``<br>``"HeatingTime": 6,``<br>``"IsForecastUsed": false`` | Küte on aktiveeritud **kuuel** kõige odavamal tunnil igas **12-tunnises** perioodis. | Suur veepaak 1000L või rohkem, suure kasutusega. |
+| ``"TimePeriod": 12,``<br>``"HeatingTime": 2,``<br>``"IsForecastUsed": false`` | Küte on aktiveeritud **kahel** kõige odavamal tunnil igas **12-tunnises** perioodis. | Väike 150L veeboiler väikesele majapidamisele. |
+| ``"TimePeriod": 6,``<br>``"HeatingTime": 2,``<br>``"IsForecastUsed": false`` | Küte on aktiveeritud **kahel** kõige kulutõhusamal tunnil igas **6-tunnises** perioodis. | Suur 200L veeboiler neljale või enamale inimesele mõeldud majapidamisele. |
+| ``"TimePeriod": 0,``<br>``"HeatingTime": 0,``<br>``"IsForecastUsed": false`` | Küte valitakse tundidel, mil ümardatud börsihind on `AlwaysOnPrice` väärtusest väiksem või sellega võrdne, kui samal ajal ei rakendu `AlwaysOffPrice`. |
 
 #### ``"EnergyProvider": "VORK1"``
-Elektrilevi või Imatra elektri ülekandetasude pakett. Valikus on VORK1, VORK2, VORK4, VORK5, Partner24, Partner24Plus, Partner12, Partner12Plus ja NONE. Vali None, et mitte arvestada ülekandetasusid. 
-Ülekandetasude üksikasjad leiab siit: [Elektrilevi](https://elektrilevi.ee/en/vorguleping/vorgupaketid/eramu) või [Imatra](https://imatraelekter.ee/vorguteenus/vorguteenuse-hinnakirjad/).
+
+Vali tabelist täpne `EnergyProvider` väärtus. `NONE` jätab võrgutasu arvestamata. Summad on **skripti seadistatud võrgutasud, EUR/MWh ilma käibemaksuta**; kontrolli oma paketi kehtivaid hindu [Elektrilevi](https://elektrilevi.ee/en/vorguleping/vorgupaketid/eramu) või [Imatra](https://imatraelekter.ee/vorguteenus/vorguteenuse-hinnakirjad/) lehelt.
 
 | Võrgupakett | Kirjeldus | |
 | - | - | :-: |
-| ``VORK1`` | **Elektrilevi**<br> Päev/öö 77 EUR/MWh | <img src="images/Vork1.jpg" alt="Elektrilevi Võrk 1" width="200"> |
-| ``VORK2`` | **Elektrilevi**<br> Päeval 60 EUR/MWh <br> Öösel 35 EUR/MWh | <img src="images/Vork2-4.jpg" alt="Elektrilevi Võrk 2, 4" width="250"> |
-| ``VORK4`` | **Elektrilevi**<br> Päeval 37 EUR/MWh <br> Öösel 21 EUR/MWh | <img src="images/Vork2-4.jpg" alt="Elektrilevi Võrk 2, 4" width="250"> |
-| ``VORK5`` | **Elektrilevi**<br> Päeval 53 EUR/MWh <br> Öösel 30 EUR/MWh <br> Päeva tipp 82 EUR/MWh <br> Puhke tipp 47 EUR/MWh | <img src="images/Vork5-1.jpg" alt="Elektrilevi Võrk 5" width="250"> <img src="images/Vork5-2.jpg" alt="Elektrilevi Võrk 5" width="250"> |
-| ``PARTN24`` | **Imatra**<br> Päev/öö 60 EUR/MWh | |
-| ``PARTN24PL`` | **Imatra**<br> Päev/öö 39 EUR/MWh | |
-| ``PARTN12`` | **Imatra**<br> Päeval 72 EUR/MWh <br> Öösel 42 EUR/MWh | Suveaeg päev: E-R kell 8:00–24:00.<br>Öö: E-R kell 0:00–08:00, L-P terve päev <br> Talveaeg päev: E-R kell 7:00–23:00.<br>Öö: E-R kell 23:00–7:00, L-P terve päev |
-| ``PARTN12PL`` | **Imatra**<br> Päeval 46 EUR/MWh <br> Öösel 27 EUR/MWh | Suveaeg päev: E-R kell 8:00–24:00.<br>Öö: E-R kell 0:00–08:00, L-P terve päev <br> Talveaeg päev: E-R kell 7:00–23:00.<br>Öö: E-R kell 23:00–7:00, L-P terve päev |
+| ``VORK1`` | **Elektrilevi**<br> Päev/öö 77.2 EUR/MWh | <img src="images/Vork1.jpg" alt="Elektrilevi Võrk 1" width="200"> |
+| ``VORK2`` | **Elektrilevi**<br> Päeval 60.7 EUR/MWh <br> Öösel 35.1 EUR/MWh | <img src="images/Vork2-4.jpg" alt="Elektrilevi Võrk 2, 4" width="250"> |
+| ``VORK4`` | **Elektrilevi**<br> Päeval 36.9 EUR/MWh <br> Öösel 21 EUR/MWh | <img src="images/Vork2-4.jpg" alt="Elektrilevi Võrk 2, 4" width="250"> |
+| ``VORK5`` | **Elektrilevi**<br> Päeval 52.9 EUR/MWh <br> Öösel 30.3 EUR/MWh <br> Tööpäeva tipp 81.8 EUR/MWh <br> Nädalavahetuse tipp 47.4 EUR/MWh | <img src="images/Vork5-1.jpg" alt="Elektrilevi Võrk 5" width="250"> <img src="images/Vork5-2.jpg" alt="Elektrilevi Võrk 5" width="250"> |
+| ``PARTN24`` | **Imatra**<br> Päev/öö 60.7 EUR/MWh | |
+| ``PARTN24PL`` | **Imatra**<br> Päev/öö 38.6 EUR/MWh | |
+| ``PARTN12`` | **Imatra**<br> Päeval 72.4 EUR/MWh <br> Öösel 42 EUR/MWh | Suveaeg päev: E-R kell 8:00–24:00.<br>Öö: E-R kell 0:00–08:00, L-P terve päev <br> Talveaeg päev: E-R kell 7:00–23:00.<br>Öö: E-R kell 23:00–7:00, L-P terve päev |
+| ``PARTN12PL`` | **Imatra**<br> Päeval 46.4 EUR/MWh <br> Öösel 27.1 EUR/MWh | Suveaeg päev: E-R kell 8:00–24:00.<br>Öö: E-R kell 0:00–08:00, L-P terve päev <br> Talveaeg päev: E-R kell 7:00–23:00.<br>Öö: E-R kell 23:00–7:00, L-P terve päev |
 | ``PAMATA1`` | Läti, Pamata-1; skripti seadistatud võrgutasu 39.62 EUR/MWh | Kõik tunnid |
 | ``SPECIAL1`` | Läti, Speciālais 1; skripti seadistatud võrgutasu 158.48 EUR/MWh | Kõik tunnid |
 | ``NONE`` | Võrgutasu on 0 ||
 
+Elektrilevi öötasu kehtib tööpäeviti 22:00–07:00 ja nädalavahetusel, välja arvatud VORK5 tiputunnid. VORK5 tiputunnid on novembrist märtsini tööpäeviti 09:00–12:00 ja 16:00–20:00 ning nädalavahetusel 16:00–20:00. Skript ei erista riigipühi.
+
 #### ``"AlwaysOnPrice": 10``
+
 Enne lävenditega võrdlemist ümardatakse börsihind kahe komakohani. Küte on sees, kui ümardatud börsihind on sellest väärtusest väiksem või sellega võrdne (EUR/MWh), välja arvatud juhul, kui rakendub ka ``AlwaysOffPrice``.
 
 #### ``"AlwaysOffPrice": 300``
+
 Küte on väljas, kui ümardatud börsihind on sellest väärtusest suurem või sellega võrdne (EUR/MWh). Kui mõlemad lävendid rakenduvad, on ``AlwaysOffPrice`` prioriteetne.
 
 #### ``"InvertedRelay": false``
+
 Konfigureerib relee oleku kas normaalseks või pööratud.
-    * ``true`` - Pööratud relee olek. Seda nõuavad mitmed maasoojuspumbad nagu Nibe või Thermia.
-    * ``false`` - Normaalne relee olek, seda kasutatakse veeboilerite või elektrilise põrandakütte puhul. 
+
+- ``true`` - Pööratud relee olek. Seda nõuavad mitmed maasoojuspumbad nagu Nibe või Thermia.
+- ``false`` - Normaalne relee olek, seda kasutatakse veeboilerite või elektrilise põrandakütte puhul.
 
 #### ``"RelayId": 0``
+
 Shelly relay ID on vaikimisi 0, kuid mitme väljundiga Shelly puhul tähistab see relee ID numbrit.
 
-
-
 #### ``"Country": "ee"``
-Börsihinna riik. Toetatud on ainult Eleringi API riigid. * ``ee`` - Eesti * ``fi`` - Soome * ``lt`` - Leedu * ``lv`` - Läti 
+
+Börsihinna riik. Toetatud väärtused:
+
+- `ee` – Eesti
+- `fi` – Soome
+- `lt` – Leedu
+- `lv` – Läti
 
 #### ``"HeatingCurve": 0``
-Ilmaennustuse prognoosi mõju suurendamine või vähendamine küttetundidele. Vaikeväärtus on ``0``, nihe 1 võrdub 1h. See seadistus kehtib ainult siis, kui kasutatakse ilmaprognoosiga kütteaga.
-Vaadake kütte kõvera mõju kütte aja sõltuvusgraafikutele: [kütteaja sõltuvusgraafikud](https://github.com/LeivoSepp/Smart-heating-management-with-Shelly?tab=readme-ov-file#heating-curve).
-    * ``-6`` - 6h vähem kütmist
-    * ``6`` - 6h rohkem kütmist
 
-# Kuidas seda skripti installida
+Mõjutab prognoosist arvutatud küttevajadust; vaikimisi `0`. Üks samm lisab arvutatud päevasele vajadusele kaks tundi enne perioodideks jagamist ja piirangute rakendamist. Sooja ilma piir, miinimum ja perioodi pikkus võivad jätta tegelikud tunnid muutmata. Virtuaalkomponendis on vahemik **−4 kuni 8**; KVS-is sobib iga lõplik arv. Vaata [küttegraafiku arvutust ja näiteid](#küttegraafik).
 
-## Paigaldamine
+### Virtuaalkomponentide paigaldamine ja taastamine
 
-1. Hankige Shelly Plus, Pro või Gen3 seade: [Shelly seadmed](https://www.shelly.com/collections/smart-switches-dimmers).
-2. Ühendage Shelly seade oma isiklikku WiFi võrku. [Shelly veebiliidese juhendid](https://kb.shelly.cloud/knowledge-base/web-interface-guides).
-5. Avage Shelly seadme veebileht: Klõpsake Settings &rarr; Device Information &rarr; Device IP &rarr; klõpsake IP-aadressil. Avaneb Shelly seadme veebileht, vasakpoolses menüüs klõpsake "<> Scripts".
-6. Klõpsake nuppu "Create Script" 
-1. Avage skripti veebileht [Githubis](https://github.com/LeivoSepp/Smart-heating-management-with-Shelly/blob/master/SmartHeatingWithShelly.js).
-2. Klõpsake nuppu "Copy raw file". Nüüd on skript teie lõikelauamälus.  
-
-<img src="images/CopyCode.jpg" alt="Insert code" width="450">
-
-1. Kleepige kood lõikelaualt skripti aknasse **Ctrl+V**.
-2.  Nimetage skript näiteks "Küte 24h-Ilmaprognoos" ja salvestage.
-3.  Kui salvestamisprotsess on lõpule viidud, klõpsake "Start".
-4.  Skripti parameetrite konfigureerimine
-    - [Shelly Virtual Component kasutamine](#shelly-rakenduse-kasutamine)
-    - [Shelly KVS-i kasutamine](#shelly-kvs-i-kasutamine)
-
-## Kuidas panna tööle kaks installatsiooni
-
-Kui Virtual Componendid on saadaval, siis esimene installatsioon kasutab neid ja ka häälestus käib nende kaudu.
-Teine installatsioon saab käia paralleelselt KVS-modes. Selleks on tarvis muuta enne skritpi käivitamist parameetrit ``mnKv: true``.
-
-### Kuidas panna skript tööle KVS-modes
-
-> [!TIP]
-> See skript võib käia ka KVS-modes isegi kui Virtuaalsed Komponendid on saadaval.
-
-Seda häälestust on vaja juhul, kui antud Shelly seadme peal on juba mõni teine skript mis kasutab Virtuaalseid Komponente.
-Ava skript ja pane ManualKVS parameeter ``mnKv: true``. Peale seda installeerub skript KVS-modes.
-
-```js
-let c = {
-    tPer: 24,       // KVS:TimePeriod VC:Heating Period (h) 24/12/6/0
-    hTim: 10,       // KVS:HeatingTime VC:Heating Time (h/period)
-    isFc: false,    // KVS:IsForecastUsed VC:Forecast Heat
-    pack: "VORK2",  // KVS:EnergyProvider VC:Network Package (NONE, VORK1, VORK2, VORK4, VORK5, PARTN24, PARTN24PL, PARTN12, PARTN12PL, PAMATA1, SPECIAL1)
-    lowR: 1,        // KVS:AlwaysOnPrice VC:Heat On (min price) (EUR/MWh)
-    higR: 300,      // KVS:AlwaysOffPrice VC:Heat Off (max price) (EUR/MWh)
-    Inv: false,     // KVS:InvertedRelay VC:Inverted Relay
-    rId: 0,         // KVS:RelayId selects the relay in both modes; required in saved configuration
-    cnty: "ee",     // KVS:Country VC:Market Price Country (ee, fi, lv, lt)
-    hCur: 0,        // KVS:HeatingCurve VC:Heating Curve 
-    tmr: 60,        // Default timer
-    pFac: 0.5,      // Power factor
-    mnKv: false,    // Forcing script to KVS mode (true) or Virtual components mode (false)
-}
-```
-
-## Skripti uuendamine
-
-Enne uuendamist kontrolli aktiivseid seadeid. `TimePeriod` toetatud väärtused on **0, 6, 12 ja 24**. Vanemates versioonides töötanud muu väärtus, näiteks 8, peatab ajakava uuendamise kuni kasutaja valib toetatud perioodi. Skript ei teisenda seda automaatselt. `HeatingTime` on miinimum iga perioodi kohta; perioodi muutmisel vaata üle ka see väärtus.
-
-KVS-režiimis sisesta arvud JSON-arvudena (`"HeatingTime": 10`, mitte `"HeatingTime": "10"`), tõeväärtused kujul `true` või `false` ning määra `Country` (`ee`, `fi`, `lv` või `lt`). Õiged paketinimed on `PARTN24PL` ja `PARTN12PL`; varasema juhendi lühemad kirjapildid olid vead. Vigased seaded jäetakse parandamiseks alles. Virtuaalkomponentide režiimis tulevad üheksa kütteseadet komponentidest, kuid salvestatud `ManualKVS` ja `RelayId` peavad olema loetavad ja korrektsed. Iga salvestatud konfiguratsioon peab sisaldama mittenegatiivset täisarvu `RelayId`, mis valib relee nii KVS- kui ka virtuaalkomponentide režiimis. Virtuaalkomponentide režiimi jaoks piisab kirjest `{ "ManualKVS": false, "RelayId": 0 }`. Ainult `ManualKVS` välja sisaldav kirje lükatakse tagasi; puuduvat relee ID-d ei asendata automaatselt nulliga. Uuel paigaldusel, kus konfiguratsioonivõtit veel pole, kasutatakse skripti algset `rId` väärtust (vaikimisi 0).
-
-Logiteade **„Schedule updates are paused”** tähendab, et ajakava ei uuendata hindade järgi. Varasem ajakava võib vanu tunde korrata; uuel paigaldusel võib ajakava puududa. Paranda teates nimetatud seade või komponent. Skript proovib uuesti iga viie minuti järel.
-
-Veel avaldamata versioon **5** eemaldab automaatse taastamise varukoopiast. Versioon salvestatakse logimise ja diagnostika jaoks; versiooninumber ei käivita andmete teisendamist. `SmartHeatingVC<ScriptId>` on aegunud: skript ei loe ega kirjuta seda võtit ning selle võib kustutada. Olemasolevate juhtkomponentide väärtused säilivad.
-
-Virtuaalkomponentide paigaldusel kehtivad järgmised reeglid. Konfiguratsiooni või SystemData lugemisviga või vigane kirje peatab ajakava uuendamise.
+Virtuaalkomponentide paigaldus sõltub üheksa nõutud juhtkomponendi seisust. Konfiguratsiooni või SystemData lugemisviga või vigane kirje peatab ajakava uuendamise.
 
 | Nõutud juhtkomponendid | Tegevus |
 | --- | --- |
@@ -270,105 +213,95 @@ Virtuaalkomponentide paigaldusel kehtivad järgmised reeglid. Konfiguratsiooni v
 | Osa puudub | Ajakava uuendamine peatub ning teade **„Missing controls”** nimetab kõik puuduvad juhtkomponendid, sõltumata SystemData olemasolust. |
 | Vigased või konfliktse nimega komponendid, ebaõnnestunud või mittetäielik lugemine | Komponente, releeseadeid ja ajakava ei muudeta. |
 
-Iga komponentide loendi vastuseleht peab sisaldama arvulist `total` välja, ka siis, kui ühel lehel on kõik üheksa korrektset juhtkomponenti. See veel avaldamata versioon nõuab seda ka tavapärasel lugemisel; vanem kood võis täieliku ühe lehe vastuse ilma selle väljata vastu võtta. Puuduv või mittearvuline `total` peatab uuendamise ja paigalduse kuni korrektse vastuseni. Kui teates nimetatud juhtkomponent on olemas, kuid jäi vastusest välja või sellel pole loetavat väärtust, oota järgmist viieminutilist lugemist. Taasta juhtkomponent käsitsi ainult siis, kui see tegelikult puudub.
+**„Schedule updates are paused”** tähendab, et ajakava ei uuendata. Varasem ajakava võib korrata vanu tunde; uuel paigaldusel võib ajakava puududa. Paranda teates nimetatud seade või komponent. Skript proovib uuesti iga viie minuti järel.
 
-Kui katkenud paigalduse järel on osa üheksast juhtkomponendist olemas ja osa puudu, peatub uuendamine ka järgmistel arvutustel ja taaskäivitustel kuni käsitsi taastamiseni. Taasta teates nimetatud juhtkomponendid käsitsi või vali KVS-režiim seadega `ManualKVS=true`. Teadlikuks vaikeväärtustega taaspaigalduseks kustuta kõik üheksa nõutud juhtkomponenti ja taaskäivita skript. **Säilita `SmartHeatingSys<ScriptId>` (SystemData): see sisaldab ajakava ID-d.** Puuduv SystemData ei anna luba osaliselt puuduvate juhtkomponentide taastamiseks. Kui lisamine ebaõnnestub enne ühegi juhtkomponendi loomist, võib järgmine arvutus paigaldust uuesti proovida, sest kõik üheksa kohta on endiselt vabad.
+Mittetäieliku komponentide loendi korral juhtkomponente, releeseadeid ja ajakava ei muudeta; skript proovib lugemist viie minuti pärast uuesti. Taasta juhtkomponent käsitsi ainult siis, kui see tegelikult puudub.
 
-Paigaldusel lisatakse kõigepealt juhtkomponendid. Seejärel proovitakse puuduvat gruppi luua ühe korra ning liikmed lisatakse ainult kinnitatud loomise järel. Lõpuks loetakse kõik juhtkomponendid uuesti. Kui komplekt on endiselt osaline, ei proovita sama arvutuse jooksul teist paigaldust; ka järgmine arvutus peatub kuni käsitsi taastamiseni. Olemasoleva grupi nimi ja liikmed säilivad. Kui grupp on juba olemas, kuid kõik üheksa juhtkomponenti puuduvad, ei lisata uusi juhtkomponente sellesse gruppi automaatselt; vajadusel lisa need käsitsi. **„Group setup incomplete”** tähendab, et grupp vajab käsitsi seadistamist; kütte juhtimine saab jätkuda. Kui kõik juhtkomponendid on olemas, ei proovita gruppi järgmistel arvutustel ega taaskäivitustel uuesti seadistada. Taaskäivitus komponentide loomise ja grupeerimise vahel võib jätta grupi puudu või tühjaks; vajadusel loo grupp või lisa liikmed käsitsi.
+Kui katkenud paigalduse järel on osa juhtkomponente puudu, ei taasta korduskatse ega taaskäivitus neid automaatselt. Taasta teates nimetatud juhtkomponendid käsitsi või [mine üle KVS-režiimi](#skripti-kvs-häälestamine), säilitades praegused seaded. Teadlikuks vaikeväärtustega taaspaigalduseks kustuta kõik üheksa nõutud juhtkomponenti ja taaskäivita skript. **Säilita `SmartHeatingSys<ScriptId>` (SystemData): see sisaldab ajakava ID-d.** SystemData kustutamine ei taasta osalist juhtkomponentide komplekti. Kui ühtki juhtkomponenti ei jõutud luua, võib järgmine arvutus paigaldust uuesti proovida.
 
-SystemData lugemisviga peatab arvutuse. Kirjutamisvea korral proovitakse sama kirjet salvestada enne järgmist arvutust. Taaskäivitus või voolukatkestus enne õnnestunud salvestamist võib jätta ajakava ID salvestamata. Skript haldab ajakava salvestatud ID järgi ega otsi või taasta omanikuta ajakavasid. Kui salvestatud ID puudub, jäetakse ajakavade loendi päring tegemata. Relee polaarsuse muutmise ebaõnnestumisel võib varasem ajakava jääda välja lülitatuks kuni järgmise õnnestunud katseni.
+**„Group setup incomplete”** tähendab, et grupp vajab käsitsi seadistamist; kütte juhtimine saab jätkuda. Olemasoleva grupi nimi ja liikmed säilivad. Vajadusel loo grupp või lisa juhtkomponendid sinna käsitsi, ka siis, kui grupp jäi taaskäivituse tõttu puudu või tühjaks. Kui kõik juhtkomponendid on olemas, ei proovita gruppi järgmistel arvutustel ega taaskäivitustel uuesti seadistada.
 
-Hinnavastus peab sisaldama kohaliku päeva kõiki 92, 96 või 100 veerandtundi. Vanu tunnihindade vastuseid ei toetata. Sügisesel kellakeeramisel kasutatakse korduva tunni esimese esinemise hinda, sest [Shelly ajakava käivitub ainult sellel esimesel korral](https://shelly-api-docs.shelly.cloud/gen2/ComponentsAndServices/Schedule/). Ka teise esinemise kõik veerandtunnid kontrollitakse üle. Kevadisel kellakeeramisel on ajastatavaid tunde 23.
+SystemData kirjutamisvea korral proovitakse sama kirjet salvestada enne järgmist arvutust. Taaskäivitus või voolukatkestus enne õnnestunud salvestamist võib jätta ajakava ID salvestamata. Skript haldab ajakava salvestatud ID järgi ega otsi või taasta omanikuta ajakavasid. Relee polaarsuse muutmise ebaõnnestumisel võib varasem ajakava jääda välja lülitatuks kuni järgmise õnnestunud katseni.
 
+# Kuidas seda skripti installida
 
-> [!WARNING] 
-> Versioonilt 4.1 ei ole uuendamine võimalik, kuna KVS andmevorming on uuemates versioonides JSON.  
-> Peale intallatsiooni, on vaja häälestused käsitsi üle käia nii Virtual Komponentide kui ka KVS-i puhul.
+## Paigaldamine
 
-1. Avage skripti veebileht [Githubis](https://github.com/LeivoSepp/Smart-heating-management-with-Shelly/blob/master/SmartHeatingWithShelly.js).
-2. Klõpsake nuppu "Copy raw file". Nüüd on skript teie lõikelauamälus.  
-3. Avage Shelly seadme veebilehelt: navigeerige Settings → Device Information &rarr; Device IP &rarr; klõpsake IP-aadressil. Avaneb Shelly seadme veebileht; vasakpoolses menüüs valige "<> Scripts."
-4. Avage skript, mida soovite uuendada.
-5. Valige kogu skriptikood ja kustutage see **Ctrl+A** &rarr; **Kustuta**.
-6. Kleepige kood lõikelaualt skripti aknasse **Ctrl+V**.
-7. Salvestage skript, versioon on nüüd uuendatud.
-8. Kõik konfiguratsioonid jäävad samaks, kuna need on salvestatud KVS-i või virtuaalsetesse komponentidesse.
+1. Hangi skriptimist toetav [Shelly Plus, Pro või Gen3 seade](https://www.shelly.com/collections/smart-switches-dimmers).
+2. Ühenda seade koduvõrku. Vaata [Shelly veebiliidese juhendeid](https://kb.shelly.cloud/knowledge-base/web-interface-guides).
+3. Ava **Settings → Device Information → Device IP** kaudu seadme veebileht ja vali **Scripts → Create Script**.
+4. Ava [skript GitHubis](SmartHeatingWithShelly.js) ja vali **Copy raw file**.
 
-## Kuidas kontrollida et skript töötab
+   <img src="images/CopyCode.jpg" alt="Kopeeri skript" width="450">
 
-1. Shelly rakenduses või veebilehel navigeerige "Schedules" (Ajakavad).
-2. Kontrollige Shelly aktiveerimise ajakava.
-3. Edasijõudnud kasutajad saavad kontrollida KVS-i salvestust: [Advanced → Key Value Storage → Script Data](#advanced--key-value-storage--script-data)
+5. Kleebi kood skripti aknasse (**Ctrl+V**), pane skriptile nimi ja salvesta.
+6. Kui soovid uut paigaldust KVS-režiimis, määra enne käivitamist `mnKv: true`, nagu [KVS-i juhendis](#skripti-kvs-häälestamine).
+7. Klõpsa **Start** ning seadista [virtuaalkomponendid](#virtuaalkomponentide-häälestamine) või [KVS](#skripti-kvs-häälestamine).
+
+## Kuidas panna tööle kaks installatsiooni
+
+Esimene installatsioon võib kasutada virtuaalkomponente; teine tuleb samal seadmel [määrata KVS-režiimi](#skripti-kvs-häälestamine). Mõlemad võivad kasutada KVS-i. Need võivad juhtida sama releed või mitme väljundiga seadmel eri releesid; vali kummagi jaoks `RelayId`.
+
+[Shelly lubab korraga käitada kuni kolme skripti](https://shelly-api-docs.shelly.cloud/gen2/ComponentsAndServices/Script/). Kaks kütteskripti jagavad üht watchdog-skripti, täites kõik kolm kohta. Samal ajal ei saa käitada teisi skripte. Kontrolli ka seadme mälukasutust, nagu eespool kirjeldatud.
+
+## Skripti uuendamine
+
+Enne uuendamist kontrolli aktiivseid seadeid. `TimePeriod` toetatud väärtused on **0, 6, 12 ja 24**. Vanemates versioonides töötanud muu väärtus, näiteks 8, peatab ajakava uuendamise kuni kasutaja valib toetatud perioodi. Skript ei teisenda seda automaatselt. `HeatingTime` määratakse iga perioodi kohta; perioodi muutmisel vaata üle ka see väärtus.
+
+Enne uuendamist kontrolli ka [seadistuskirjet](#skripti-kvs-häälestamine): arvud peavad olema JSON-arvud, tõeväärtused `true` või `false`, `Country` toetatud riigikood ja `RelayId` mittenegatiivne täisarv. Virtuaalkomponentide režiimis peavad salvestatud režiim ja relee ID olema korrektsed. Õiged paketinimed on `PARTN24PL` ja `PARTN12PL`; varasema juhendi lühemad kirjapildid olid vead.
+
+Veel avaldamata versioon **5** eemaldab automaatse taastamise varukoopiast. Versioon salvestatakse logimise ja diagnostika jaoks; versiooninumber ei käivita andmete teisendamist. `SmartHeatingVC<ScriptId>` on aegunud: skript ei loe ega kirjuta seda võtit ning selle võib kustutada. Olemasolevate juhtkomponentide väärtused säilivad.
+
+> [!WARNING]
+> Otsest uuendamist versioonilt 4.1 ei toetata, sest KVS-i andmevorming muutus JSON-iks. Pärast paigaldamist seadista kõik väärtused uuesti KVS-is või virtuaalkomponentides.
+
+1. Ava [skript GitHubis](SmartHeatingWithShelly.js) ja vali **Copy raw file**.
+2. Ava seadme veebileht **Settings → Device Information → Device IP** kaudu ja vali **Scripts**.
+3. Ava uuendatav skript, vali kogu kood (**Ctrl+A**) ja kustuta see.
+4. Kleebi uus kood (**Ctrl+V**) ja salvesta.
+5. KVS-is või virtuaalkomponentides salvestatud seaded säilivad. Kontrolli nende sobivust ülaltoodud nõuetega ning [vaata ajakava](#ajakava-jälgimine-ja-muutmine).
+
+Paigalduse probleemide korral vaata [virtuaalkomponentide taastamise juhiseid](#virtuaalkomponentide-paigaldamine-ja-taastamine).
 
 ## Kuidas skript töötab
 
-1. Internetiühendus:
-    * Skript vajab internetti, et alla laadida igapäevaseid elektrihindu ja ilmaprognoose.
-2. Igapäevane töö:
-    * Skript töötab iga päev pärast kella 23:00 või vastavalt vajadusele päeva jooksul, et määrata küttetunnid.
-3. Töövoog:
-    * Skript järgib vooskeemi, et määrata parimad kütmissetunnid turuhindade ja ilmaprognooside põhjal.
+Skript vajab internetti [Eleringi hindade](https://dashboard.elering.ee/assets/api-doc.html#/nps-controller/getPriceUsingGET) ja soovi korral [Open-Meteo ilmaprognoosi](https://open-meteo.com/en/docs) laadimiseks. See arvutab ajakava käivitamisel ja uuendab seda pärast kella 23:00; prognoosiga lühemates režiimides ka enne järgmist kütteperioodi.
 
+Hinnavastus peab sisaldama kohaliku päeva kõiki 92, 96 või 100 veerandtundi. Vanu tunnihindade vastuseid ei toetata. Sügisesel kellakeeramisel kasutatakse korduva tunni esimese esinemise hinda, sest [Shelly ajakava käivitub ainult sellel esimesel korral](https://shelly-api-docs.shelly.cloud/gen2/ComponentsAndServices/Schedule/). Ka teise esinemise kõik veerandtunnid kontrollitakse üle. Kevadisel kellakeeramisel on ajastatavaid tunde 23.
+
+Töötav watchdog jälgib kütteskripti peatamist ja kustutamist:
 
 ```mermaid
 flowchart TD
-    0@{ shape: circle, label: "Start" } --> A
-    A[Get Shelly time and location] --> K{Is forecast used?}
-    K -- Yes --> B{Get forecast <br> from Open-Meteo.com API}
-    B -- Succeeded </br>Calculate heating time --> D{Get market price <br> from Elering API}
-    K -- No --> D
-    B --> M@{ shape: subproc, label: "Failed</br>Check again in 5 minute" }
-    D -- Succeeded</br>Calculate heating schedules --> L{Check, if market price and </br> forecast needs update}
-    D --> M
-    L --> M
-    L -- Yes</br>Start the script --> 0
-```
-
-4. Watchdog workflow
-
-```mermaid
-flowchart TD
-    0@{ shape: circle, label: "Start" } --> A
-    A[Create 'watchdog' </br>event handler] --> K{Is heating script </br>stopped or deleted?}
-    K -- Yes --> B[Find the script schedule</br>and delete it]
+    A[Kütteskript peatub või kustutatakse] --> B[Watchdog loeb SystemData kirjet]
+    B --> C{Salvestatud ajakava ID on olemas?}
+    C -- Jah --> D[Kustuta salvestatud ID-ga ajakava]
+    D --> E{Kustutamine õnnestus?}
+    E -- Jah --> F[Salvesta ExistingSchedule väärtusega 0]
 ```
 
 ## Oluline teada
 
-* <p>Kui skript peatatakse, kustutatakse kütte ajakava. Shelly järgib kütte algoritmi ainult siis, kui skript töötab.</p>
-* <p>Kaks skripti installatsiooni saab käia korraga, kui esimene neist töötab Virtuaalsete Komponentidega, siis teine saab olla ainult KVS modes.
-* <p>KVS-režiimis võib korraga töötada kuni kaks erineva algoritmiga skripti ühel seadmel. Skriptid võivad kasutada kas sama releeväljundit Shelly Plus 1-ga või erinevaid releeväljundeid, nagu toetab näiteks Shelly Plus 2PM.</p>
-* <p>See skript loob spetsiaalse "valvuri/watchdog" skripti. See "valvuri" skript kustutab Shelly kütte ajakava kui põhiskript peatatakse või kustutatakse.</p>
-* <p>Interneti katkestuste mõju vähendamiseks kasutab see skript parameetrit ``heating time``, et lülitada küte ajalooliselt odavamate tundide järgi sisse.</p>
-* <p>Selle skripti "Run on startup" nupp peab olema aktiveeritud. See seadistus tagab, et skript käivitub pärast voolukatkestust, Shelly taaskäivitust või püsivara uuendamist.</p>
-* <p>See skript haldab ainult tema enda loodud kütte ajakava. See skript kustutab ainult selle ajakava, mille ise on loonud.</p>
-* <p>See lahendus on kasulik ainult siis, kui teil on börsihinnaga elektrileping. Kui teie elektrileping on kindla hinnaga, siis antud lahendus ei aita rahalist kokkuhoidu saavutada.</p>
-* See skript sõltub internetist ja kahest teenusest:
-    * Elektrituru hind [Eleringi API](https://dashboard.elering.ee/assets/api-doc.html#/nps-controller/getPriceUsingGET),
-    * Ilmaprognoos [Open-Meteo API](https://open-meteo.com/en/docs).
-* Selle paigaldusjuhendi kasutamisel vali püsivara 1.4.4 või uuem. Skripti senine võimekuse kontroll lubab virtuaalkomponente Gen2 Pro seadmetel alates versioonist 1.4.3 ning Gen3/Gen4 seadmetel põlvkonna järgi; see ei ole täielik püsivara ühilduvuse test.
+- Skript püüab lubada enda ja watchdog-skripti automaatse käivitumise. Kontrolli pärast püsivara uuendamist, et **Run on startup** oleks mõlemal lubatud.
+- Kütteskripti peatamisel või kustutamisel eemaldab töötav watchdog selle salvestatud ajakava. Watchdog'i paigalduse või kustutamise tõrked on logis; ainult kütteskripti peatamine ei kinnita ajakava kustutamist.
+- Skript haldab ajakava SystemData kirjes oleva ID järgi. Säilita see kirje, ka juhtkomponentide taastamisel.
 
 ## Testitud rikkestsenaariumid
 
-Kui `TimePeriod: 0` korral puuduvad hinnad, peatatakse ajakava uuendamine ning säilivad olemasolev ajakava ja relee seadistus. Ainult hinnapiiridel põhineval režiimil ei ole ajalooliste odavate tundide varuajakava. Korrektsete hindade saabumisel jätkub hinnapõhine ajastamine. Ajaperioodiga režiimi varuajakava eemaldab nullile seatud kütteaja korral endiselt kütte ajakava.
-Ajaperioodiga režiimides kasutab Shelly alltoodud rikete ajal ``Heating Time`` kestust, et lülitada küte ajalooliselt odavamate tundide järgi sisse.
-Internetirikke korral jagab Shelly oma küttetunnid vastavalt häälestatud perioodide vahel.
-
-**Testitud rikkestsenaariumid**
-1. Shelly töötab edasi, kuid internet läheb maha kodurouteri või internetiteenuse pakkuja rikke tõttu. Shelly kellaaeg jääb korrektseks.
-2. Pärast voolukatkestust internet ei tööta ja Shellyl puudub kellaaeg.
-3. Eleringi HTTP viga tekib ja Eleringi server pole kättesaadav.
-4. Eleringi API rike juhtub ja teenus on maas.
-5. Eleringi API tagastab valed andmed ja hinnad puuduvad.
-6. Ilmaprognoosi HTTP viga tekib ja server pole saadaval.
-7. Ilmaprognoosi API teenuse viga tekib ja JSON andmeid ei saada.
+- Kui ajaperioodiga režiimis ei saa hindu või vajalikku ilmaprognoosi, kasutab skript `HeatingTime` alusel ajalooliselt odavamate tundide varuajakava. Väärtus `HeatingTime: 0` eemaldab sel juhul kütte ajakava.
+- Ainult hinnapiiridel põhinevas režiimis (`TimePeriod: 0`) peatub hindade puudumisel ajakava uuendamine. Olemasolev ajakava ja releeseaded säilivad; varuajakava ei kasutata.
+- Konfiguratsiooni või SystemData lugemisvea korral väljastatakse **„Schedule updates are paused”**. Juhtkomponendid, releeseaded ja ajakava jäävad muutmata.
+- Voolukatkestuse järel ootab skript seadme kellaaega umbes 30 sekundit. Kui kellaaega ikka pole, kasutab ajaperioodiga režiim ülaltoodud varuajakava; ainult hinnapiiridel põhinev režiim peatab uuendamise.
+- Kellaaja sünkroonimisel proovib skript uuesti arvutada. Ebaõnnestunud päringuid proovitakse uuesti viieminutilise intervalliga.
 
 # Maasoojuspumpade Thermia Villa & Eko Classic nutikas kütmine Shelly abil
 
-Thermia Villa ja Thermia Eko Classic on küll suhteliselt vanad, kuid siiski hästi tööötavad ja päris populaarsed maasoojuspumbad. 
+Kontrolli ühendusi oma soojuspumba paigaldusjuhendi järgi.
+
+Thermia Villa ja Thermia Eko Classic on küll suhteliselt vanad, kuid siiski hästi töötavad ja päris populaarsed maasoojuspumbad.
 Käesolev juhis nõustab kuidas need soojuspumbad Shelly abil nutikalt kütma panna.
 
-Instruktsioonid ja ühendused  
+Instruktsioonid ja ühendused
 (Esiteks mõlema soojuspumba installer manualist pilt.)
 
 |Thermia Villa|Thermia Eko Classic|
@@ -377,9 +310,9 @@ Instruktsioonid ja ühendused
 
 Ühenda **kaks Shelly seadet** maasoojuspumba sees vastavalt **skeemile**.
 
- <img src="images/ThermiaShelly.jpg" alt="Connect Thermia and Shelly" width="500">
+ <img src="images/ThermiaShelly.jpg" alt="Thermia soojuspumba ja Shelly ühendusskeem" width="500">
 
-Alljärgnevast tabelist leiad kuidas **häälestada oma Shelly seadmed**.  
+Alljärgnevast tabelist leiad kuidas **häälestada oma Shelly seadmed**.
 Mõlemale Shelly seadmele installeeri Smart Heating skript ja häälesta vastavalt kas kütte või sooja vee tootmise jaoks.
 
 |Heatpump|Heating+Hot Water|only Hot Water|
@@ -391,32 +324,17 @@ Siin on **soojuspumba tööolukorrad** lihtsalt infoks.
 
 |Thermia Villa|Thermia Eko Classic|Shelly 1|Shelly 2|
 |---|---|---|---|
-|EVU Stop <br>No heating or hot water|Hot water <br> Reduced Temperatur|On|On|
-|Hot Water<br> Reduced Temperatur|EVU Stop<br>No heating or Hot water|On|Off|
+|EVU Stop <br>No heating or hot water|Hot water <br> Reduced Temperature|On|On|
+|Hot Water<br> Reduced Temperature|EVU Stop<br>No heating or Hot water|On|Off|
 |Normal heating <br>Normal Hot water|Normal heating <br>Normal Hot water|Off|On|
 |Normal heating <br>Normal Hot water|Normal heating <br>Normal Hot water|Off|Off|
 
 # Nutikad kütte algoritmid
 
+<a name="ilmaprognoosipõhise-kütmise-eelised"></a>
 ## Ilmaprognoosi algoritm
 
-> [!TIP] 
-> See algoritm arvutab järgmise päeva kütteaja ilmaprognooside põhjal.  
-> See on eriti tõhus erinevate koduküttesüsteemide jaoks, kuna optimeerib küttevajaduse eeldatavate ilmastikuoludega.
-
-### Ilmaprognoosipõhise kütmise eelised
-
-* Välistemperatuurile reageerimine:
-
-Kui välistemperatuur on +17 kraadi, pole üldjuhul kütmist vaja. Kui aga temperatuur langeb -5 kraadini, on vajalik mõningane kütmine ja eriti külmades tingimustes, nagu -20 kraadi, on vaja märkimisväärselt kütmist. Ilmateade kohandab kütmiseks võetavate tundide arvu vastavalt välistemperatuurile.
-
-* Nutikas kütte haldamine:
-
-Ilmaprognooside kasutamine võimaldab nutikat ja kohanduvat küttehaldust. Süsteem kohandab küttetunde välise temperatuuri põhjal, luues reageeriva ja dünaamilise kütte ajakava.
-
-* Asukohapõhine prognoos:
-
-Täpse ilmaprognoosi saamiseks on tarvis teada asukohta, et arvutada välja parim küttestrateegia.
+Prognoosiga režiim kohandab kütteaja järgmise perioodi prognoositava tajutava temperatuuri järgi. Üle +16 °C seab algoritm prognoosipõhise küttevajaduse nulliks: näiteks +17 °C juures on see null, −5 °C juures suurem ning −20 °C juures veel suurem. Tegelikud tunnid sõltuvad ka küttegraafikust, miinimumist ja hinnapiiridest.
 
 ### Shelly geograafiline asukoht
 
@@ -427,27 +345,24 @@ Märkus: Shelly asukoht määratakse teie internetiteenuse pakkuja IP-aadressi p
 
 ### Küttegraafik
 
-Temperatuuri ja kütteaja vaheline seos on tuntud kui *küttegraafik*.
+`HeatingCurve` võimaldab kohandada küttevajadust hoone soojapidavuse järgi. Arvutus kasutab Open-Meteo tajutavat temperatuuri:
 
-Kütteaega mõjutab teie maja isolatsioon. Näiteks vana ja soojustamata maja võib vajada -5 kraadi juures 10 tundi kütmist, samas kui uus A-klassi maja vajab võib-olla ainult 6 tundi.
+1. `T` on prognoositud tajutavate temperatuuride keskmine, ümardatud üles.
+2. Päevane vajadus tundides = `(16 − T) × pFac + 2 × HeatingCurve − 2`. `pFac` on vaikimisi `0.5` ja seda muudetakse skriptis.
+3. Kui `T > 16` või tulemus on negatiivne, on päevane vajadus `0`.
+4. Jaga päevane vajadus perioodide arvuga (`24 / TimePeriod`) ja ümarda alla.
+5. Positiivse päevase vajaduse korral tõsta tulemus vajadusel miinimumini `HeatingTime`.
+6. Tulemus ei tohi ületada perioodi pikkust.
 
-Nende erinevuste arvestamiseks sisaldab skript parameetrit ``heatingCurve``, mis võimaldab kasutajal kohandada küttetegurit vastavalt maja soojapidavusele.
+Graafikud kasutavad `pFac: 0.5`, `HeatingTime: 0` ja `HeatingCurve` väärtusi −4 kuni 8. Tunnid ümardatakse alla ning ülempiir on perioodi pikkus. Positiivse küttevajaduse korral võib määratud miinimum tundide arvu suurendada; hinnapiirid rakenduvad hiljem.
 
-* 24-tunnise perioodi graafik iseloomustab kuidas kütteaeg varieerub välistemperatuuri ja ``heatingCurve`` parameetri põhjal, mis omakorda nihutab küttegraafikut vasakule või paremale 1h sammuga. 
+<img src="images/HeatingCurve24.png" alt="Prognoositud küttetunnid 24-tunnise perioodi kohta" width="750">
 
-<img src="images/HeatingCurve24.jpg" alt="Küttegraafik 24-tunniseks perioodiks" width="750">
-
-____
-
-* 12-tunnise perioodi küttegraafik ja kütteaja sõltuvus välistemperatuuri ja ``heatingCurve`` parameetrist.
-
-<img src="images/HeatingCurve12.jpg" alt="Küttegraafik 12-tunniseks perioodiks" width="750">
-
-Kui matemaatiline pool huvitab siis küttegraafuku lineaarvõrrand on järgmine: ``(Temperatuuri prognoos) * PowerFactor + (Temperatuuri prognoos + heatingCurve)``.
+<img src="images/HeatingCurve12.png" alt="Prognoositud küttetunnid 12-tunnise perioodi kohta" width="750">
 
 ## Ajaperioodi algoritm
 
-> See algoritm jagab päeva perioodideks, aktiveerides kütte kõige odavamatel tundidel igas perioodis. See sobib hästi kasutusjuhtudeks, nagu kuumavee boilerid, kus kasutus sõltub majapidamise suurusest ja mitte välistemperatuurist. See meetod optimeerib energiakasutust ning vesi püsib soe kõige madalamate elektri börsi hindadega.
+> See algoritm jagab päeva perioodideks, aktiveerides kütte kõige odavamatel tundidel igas perioodis. See sobib hästi kasutusjuhtudeks, nagu kuumavee boilerid, kus kasutus sõltub majapidamise suurusest ja mitte välistemperatuurist. Vali perioodi pikkus ja küttetunnid vastavalt majapidamise vajadustele.
 
 Igas kütteperioodis valitakse võrdse arvutatud hinnaga (koos võrgutasuga) tundidest esmalt hilisemad; alati sisse- ja väljalülitamise hinnareeglid kehtivad endiselt.
 
@@ -455,23 +370,16 @@ Igas kütteperioodis valitakse võrdse arvutatud hinnaga (koos võrgutasuga) tun
 
 <img src="images/Heating24_10.jpg" alt="Kütteperiood 24 tundi" width="750">
 
-___
-
-* 4-tunnine graafik ja kuidas 1 kõige odavam kütmise tund valitakse iga 4-tunnise perioodi kestel.
-
-<img src="images/Heating4_1.jpg" alt="Kütteperiood 4 tundi" width="750">
-
-</br>
-
 # Kas see tõesti vähendab minu elektriarveid
-Lühidalt: jah.
 
-Siin on ka üksikasjalikum selgitus. Kuigi teie üldine igapäevane elektritarbimine jääb samaks, optimeerib see skript teie kütteseadmete töö kõige odavamatele tundidele. Seetõttu väheneb teie elektriarve, kuigi energia tarbimine jääb samaks.
+Sääst sõltub paigalduse ja lepingu tingimustest. Lahendus sobib eelkõige siis, kui:
 
-Sellised seadmed nagu veeboilerid, veepaagid, maakütte- või õhksoojuspumbad, elektriradiaatorid, põrandakütte elektrisüsteemid ja konditsioneerid on seadmed, mis annavad kõige suurema kasu börsihinnaga juhtimisel.
+- sul on börsihinnaga elektrileping;
+- kütmist saab nihutada odavamatele tundidele;
+- perioodide vahel jätkub salvestatud soojust või sooja vett;
+- valitud võrgupakett vastab sinu lepingule, sest võrgutasud võivad tundide hinnajärjestust muuta.
 
-Elektrihinnad võivad kõikuda märkimisväärselt, varieerudes päeva jooksul kuni 100 korda. Elektrituru hindade kohta lisateabe saamiseks vaadake järgmist linki: [Elering](https://dashboard.elering.ee/et/nps/price)
-
+Väiksem elektriarve ega muutumatu tarbimine ei ole garanteeritud. Hinda tulemust oma tarbimise, kulude ja mugavuse järgi. Hindu saad vaadata [Eleringi lehelt](https://dashboard.elering.ee/et/nps/price).
 
 # Tõrkeotsing
 
@@ -496,27 +404,6 @@ Kui seadme veebilehele juurdepääs ei ole võimalik, järgige neid samme Shelly
     Kui selle protsessi käigus tekib probleeme, saate seda lahendust korrata, alustades skripti kustutamise sammust.
 
 <img src="images/CouldntGetScript.jpg" alt="Couldn't get script." width="750">
-
-## Advanced &rarr; Key Value Storage &rarr; Script Data
-
-Skript salvestab andmed Shelly KVS (Key-Value-Storage) säilitamaks neid elektrikatkestuste või taaskäivituste korral.
-
-Salvestatud andmete juurde pääsemiseks Shelly seadme veebilehe kaudu, navigeerige **Advanced &rarr; KVS**.
-
-1. Parameeter: ``ExistingSchedule`` Väärtus: ``1``
-   
-    See on skripti poolt loodud ajakava ID number. See teave on oluline iga skripti jaoks, et tuvastada ja hallata seotud ajakava. 
-
-2. Parameeter: ``LastCalculation`` Väärtus: ``Fri Dec 27 2024 23:29:20 GMT+0200`` 
-   
-   See ajatempel näitab aega, millal skript sai edukalt Eleringi API kaudu börsihinnad ja tekitas kütmise jaoks ajakava. See teave pakub head ülevaadet skripti tegevuse ajakavast.
-
-3. Parameeter: ``Version`` Väärtus: ``4.3`` 
-   
-   Versioon näitab installitud skripti versiooni.
-
-<img src="images/KvsSystem.jpg" alt="Key Value Storage" width="750">
-
 
 # Litsents
 

@@ -50,7 +50,7 @@
 ## Key Features
 
 1. **Forecast heating:** calculates heating hours from the forecast apparent temperature.
-2. **Fixed heating periods:** selects the cheapest hours within each 6-, 12- or 24-hour period.
+2. **Fixed heating periods:** selects the cheapest hours within each configured period (1–24 whole hours in KVS; 6, 12 or 24 in the app).
 3. **Price thresholds:** adds or excludes heating hours based on market-price limits.
 4. **Two instances on one device:** supports separate heating needs; see [running two instances](#how-to-run-two-instances-of-this-script).
 
@@ -91,7 +91,7 @@ After successfully deleting the heating schedule, the watchdog sets `ExistingSch
 
 Virtual Components let you change the nine heating settings in the Shelly app. `RelayId` is selected in the KVS record in both modes.
 
-Unless KVS mode is forced, the script selects Virtual Component mode on Gen2 Pro devices with firmware 1.4.3 or newer, and on Gen3/Gen4 devices by generation. These installation instructions require firmware 1.4.4 or newer; the mode-selection check is not a complete compatibility test.
+Virtual Components are available on Gen2 Pro devices with firmware 1.4.3 or newer, and on Gen3/Gen4 devices by generation. Unless KVS mode is forced, existing controls supply the heating settings. If no heating controls exist and the saved KVS configuration is complete and valid, it remains active; the script does not install defaults over it. These installation instructions require firmware 1.4.4 or newer; the mode-selection check is not a complete compatibility test.
 
 <img src="images/ShellyVirtualComponents.jpg" alt="Shelly Virtual Components" width="700">
 
@@ -133,7 +133,7 @@ Enter numbers as JSON numbers (`10`) and booleans as `true` or `false`. Every sa
 
 #### Heating parameters
 
-`TimePeriod` supports **0, 6, 12 and 24**. Without forecasting, `HeatingTime` sets the hours selected per period; with forecasting, it is the minimum applied only when heating demand is positive. Price thresholds can change the selected hours. The uses below are starting points for configuration.
+`TimePeriod` accepts whole numbers from **0 to 24** in KVS, including 4 and 8; Virtual Components offer **0, 6, 12 and 24**. Zero selects threshold-only mode. Periods start at midnight; if the period does not divide 24 evenly, the final period ends at midnight. Without forecasting, `HeatingTime` sets the hours selected per period; with forecasting, it is the minimum applied only when heating demand is positive. Price thresholds can change the selected hours. The uses below are starting points for configuration.
 
 |Heating mode|Description|Proposed usage|
 |---|---|---|
@@ -206,7 +206,7 @@ Virtual Component installation depends on the state of the nine required control
 | Required controls | Action |
 | --- | --- |
 | All nine present and valid | Use their values for heating. |
-| All nine absent | Install defaults, including when switching from KVS mode with an existing SystemData record. |
+| All nine absent | Keep a complete, valid saved KVS configuration active. Otherwise install defaults. |
 | Some absent | Pause schedule updates and report **“Missing controls”**, naming every missing control, whether SystemData exists or not. |
 | Invalid/conflicting controls or failed/incomplete reads | Pause without changing controls, relay settings or schedules. |
 
@@ -214,7 +214,7 @@ Virtual Component installation depends on the state of the nine required control
 
 If the log reports an incomplete inventory, heating controls, relay settings and schedules remain unchanged; the script retries the read after five minutes. Restore a control manually only if it is actually missing.
 
-If an interrupted installation leaves some controls missing, retries and restarts do not restore them automatically. Restore the named controls manually or [switch to KVS mode](#configuration-using-kvs), preserving your current settings. To intentionally reinstall defaults, delete all nine required controls and restart. **Keep `SmartHeatingSys<ScriptId>` (SystemData): it holds the schedule ID.** Deleting SystemData does not repair a partial set of controls. If no controls were created, the next calculation can retry installation.
+If an interrupted installation leaves some controls missing, retries and restarts do not restore them automatically. Restore the named controls manually or [switch to KVS mode](#configuration-using-kvs), preserving your current settings. To intentionally install or reinstall defaults, back up your settings, delete all nine required controls, and replace the configuration record with `{ "ManualKVS": false, "RelayId": 0 }`, using your actual relay ID. Restart and configure the new controls. **Keep `SmartHeatingSys<ScriptId>` (SystemData): it holds the schedule ID.** Deleting SystemData does not repair a partial set of controls. If no controls were created, the next calculation can retry installation.
 
 **“Group setup incomplete”** means grouping needs manual attention; heating can proceed. Existing groups retain their names and membership. Create the group or add controls manually if needed, including when a restart left the group absent or empty. Once all controls exist, later calculations and restarts do not retry grouping.
 
@@ -243,7 +243,7 @@ The first instance may use Virtual Components; the second must be explicitly [fo
 
 ## Updating Script
 
-Before upgrading, check the active settings. Supported `TimePeriod` values are **0, 6, 12 and 24**. Earlier versions could use other values, such as 8; this version pauses schedule updates until you choose a supported value. It does not convert 8 to another period. `HeatingTime` is set per period, so review it when changing the period.
+Before upgrading, check the active settings. KVS accepts whole-hour `TimePeriod` values from **0 to 24**; existing 4- and 8-hour periods remain supported. `HeatingTime` is set per period, so review it when changing the period. An upgrade that makes Virtual Components available keeps a complete, valid KVS configuration active while no heating controls exist.
 
 Also check the [configuration record](#configuration-using-kvs): use JSON numbers, `true` or `false` for booleans, a supported `Country`, and a non-negative integer `RelayId`. Saved mode and relay settings must be valid even in Virtual Component mode. The package names are `PARTN24PL` and `PARTN12PL`; shorter spellings in older instructions were errors.
 
@@ -285,7 +285,7 @@ flowchart TD
 
 ## Tested Failure Scenarios
 
-- When prices or a required forecast are unavailable in a timed mode, the script uses historically cheaper fallback hours based on `HeatingTime`. With `HeatingTime: 0`, this removes the heating schedule.
+- When prices or a required forecast are unavailable in a timed mode, the script selects fallback hours within each period using the historical price ranking and `HeatingTime`. Selection is limited to the hours available in that period. With `HeatingTime: 0`, this removes the heating schedule.
 - In threshold-only mode (`TimePeriod: 0`), unavailable prices pause updates. The existing schedule and relay settings remain; there is no historical-hour fallback.
 - Failed configuration or SystemData reads log **“Schedule updates are paused”** and leave heating controls, relay settings and schedules unchanged.
 - After a power cut, the script waits about 30 seconds for device time. If time is still unavailable, timed modes use the fallback above; threshold-only mode pauses updates.
@@ -347,7 +347,7 @@ Note: Shelly's location is determined based on your internet provider's IP addre
 1. `T` is the mean forecast apparent temperature, rounded up.
 2. Daily demand in hours = `(16 − T) × pFac + 2 × HeatingCurve − 2`. `pFac` defaults to `0.5` and is set in the script.
 3. If `T > 16` or the result is negative, daily demand is `0`.
-4. Divide daily demand by the number of periods (`24 / TimePeriod`) and round down.
+4. Divide daily demand by the number of periods (`24 / TimePeriod`, rounded up) and round the result down.
 5. When daily demand is positive, raise the result to `HeatingTime` if it is below that minimum.
 6. Cap the result at the period length.
 
@@ -365,7 +365,7 @@ Within each heating period, hours with equal calculated prices, including transm
 
 * A 24-hour graph with 10 heating hours visually shows when the most affordable times for heating are chosen during the day. The red bar represents heating hours within the day.
 
-<img src="images/Heating24_10.jpg" alt="Heating period 24h" width="750">
+<img src="images/Heating24_10.png" alt="Heating period 24h" width="750">
 
 # Does it Truly Reduce My Electric Bills
 

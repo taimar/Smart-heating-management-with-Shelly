@@ -48,7 +48,7 @@ heatingTime: Heating Time is the duration of the cheapest hours within a Heating
 isFcstUsed: true/false - Using weather forecast to calculate heating duration.
 */
 let c = {
-    tPer: 24,       // KVS:TimePeriod VC:Heating Period (h) 24/12/6/0
+    tPer: 24,       // KVS:TimePeriod 0..24 whole hours; VC:Heating Period (h) 24/12/6/0
     hTim: 10,       // KVS:HeatingTime VC:Heating Time (h/period)
     isFc: false,    // KVS:IsForecastUsed VC:Forecast Heat
     pack: "VORK2",  // KVS:EnergyProvider VC:Network Package (NONE, VORK1, VORK2, VORK4, VORK5, PARTN24, PARTN24PL, PARTN12, PARTN12PL, PAMATA1, SPECIAL1)
@@ -121,6 +121,7 @@ let _ = {
     cdOk: false,    //configuration read succeeded this cycle
     installAttempted: false, //at most one installation batch per calculation
     cdMissing: false, //configuration key is confirmed absent
+    kvsReady: false, //complete saved KVS settings available if no controls are installed
     wdOk: false,    //watchdog code verified since boot
     wdId: 0,        //watchdog script ID
 };
@@ -317,6 +318,7 @@ function kvsS() {
 // Get KVS ConfigurationData and SystemData
 function gKvs() {
     _.cdOk = false;
+    _.kvsReady = false;
     _.sdOk = false;
     _.installAttempted = false;
     _.cdMissing = false;
@@ -349,6 +351,8 @@ function rConf(res, err, msg) {
     if (saved.ManualKVS !== undefined) { c.mnKv = saved.ManualKVS; }
     if (isVC()) {
         c.rId = saved.RelayId;
+        _.kvsReady = cErr(saved) === "";
+        if (_.kvsReady) { memC(saved); }
     } else {
         const problem = cErr(saved);
         if (problem) {
@@ -408,7 +412,10 @@ function nOk(v) { return typeof v === "number" && v - v === 0; }
 function idOk(v) { return nOk(v) && v >= 0 && v % 1 === 0; }
 function vErr(v, kvs) {
     if (!v || v.length !== 9) { return "expected nine control values"; }
-    if (v[0] !== "0" && v[0] !== "6" && v[0] !== "12" && v[0] !== "24") { return "TimePeriod must be 0, 6, 12 or 24"; }
+    if (kvs) {
+        const period = Number(v[0]);
+        if (!idOk(period) || period > 24 || "" + period !== v[0]) { return "TimePeriod must be a whole number from 0 to 24"; }
+    } else if (v[0] !== "0" && v[0] !== "6" && v[0] !== "12" && v[0] !== "24") { return "TimePeriod must be 0, 6, 12 or 24 in virtual controls"; }
     if (!nOk(v[1]) || v[1] < 0 || (!kvs && v[1] > 24)) { return "HeatingTime must be a non-negative number (0 to 24 in virtual controls)"; }
     if (typeof v[2] !== "boolean") { return "IsForecastUsed must be true or false"; }
     if (!pack(v[3], true)) { return "EnergyProvider is not a supported network package"; }
@@ -549,7 +556,12 @@ function rVc(state) {
                 }
                 rErr("Missing controls: " + missingNames + ". If these controls exist, wait for the next read; " +
                     "restore them manually only if they are actually missing, or set ManualKVS=true. " +
-                    "To intentionally reinstall defaults, remove all nine controls and restart; keep SystemData.");
+                    "To intentionally reinstall defaults, remove all nine controls, keep only ManualKVS=false and RelayId in the configuration, and restart; keep SystemData.");
+                return;
+            }
+            if (_.kvsReady) {
+                print(_.pId, "Script in KVS mode: no heating controls are installed; keeping saved KVS settings.");
+                main();
                 return;
             }
             _.installAttempted = true;
@@ -743,7 +755,7 @@ function gEle() {
                 print(_.pId, "No energy prices at or below min price level. No heating.");
             }
         } else {    // Calculate schedules based on the cheap hours in the heating period.
-            let numP = Math.ceil((new Date().getHours() % 23 + 2) / c.tPer);    //finds the current period for forecast calculation    
+            let numP = Math.floor(((new Date().getHours() + 1) % 24) / c.tPer) + 1; //period containing the next hour
 
             // Create an array for each heating period, sort, and push the prices 
             for (let i = 0; i < _.cPer; i++) {                              //loop through the periods
@@ -1007,12 +1019,15 @@ function fMan() {
 
     let chpH = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 21, 22, 23, 18, 19, 20];
     let eler = [];
-    const fbTim = c.hTim > c.tPer ? c.tPer : c.hTim;
-    for (let i = 0; i < _.cPer; i++) {                  //create schedule for each period
-        let hT = (i * c.tPer) + fbTim;                  //use configured fallback time
-        hT = hT > 24 ? 24 : hT;                         //if the end of the period is more than 24, set it to 24
-        for (let j = i * c.tPer; j < hT; j++) {         //find the prices in each period
-            eler.push([chpH[j], "-"]);                  //copy the price to the new array
+    for (let i = 0; i < _.cPer; i++) {
+        let count = 0;
+        // Apply the historical preference only to hours inside this period.
+        for (let j = 0; j < chpH.length && count < c.hTim; j++) {
+            const hour = chpH[j];
+            if (hour >= i * c.tPer && hour < (i + 1) * c.tPer) {
+                eler.push([hour, "-"]);
+                count++;
+            }
         }
     }
     chpH = null;

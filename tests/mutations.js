@@ -8,11 +8,18 @@ const sourcePath = path.resolve(process.argv[2] || path.join(__dirname, '..', 'S
 const source = fs.readFileSync(sourcePath, 'utf8');
 const suite = path.join(__dirname, 'spec.js');
 const mutations = [
+    ['kvs-four-hour-period-rejected', 'S18', 'period > 24', 'period > 24 || period === 4'],
+    ['one-hour-forecast-skips-midnight', 'S18c',
+        'Math.floor(((new Date().getHours() + 1) % 24) / c.tPer) + 1',
+        'Math.ceil((new Date().getHours() % 23 + 2) / c.tPer)'],
+    ['saved-kvs-replaced-by-vc-defaults', 'S40c', '_.kvsReady = cErr(saved) === "";', '_.kvsReady = false;'],
     ['watchdog-restarted-each-cycle', 'S13',
         'if (status && status.running) {\n            _.isLp = false;\n            return;',
         'if (false) {\n            _.isLp = false;\n            return;'],
     ['incomplete-quarter-day', 'S14', '!valid || qCnt !== qExp', '!valid'],
-    ['unbounded-fallback-hours', 'S10', 'const fbTim = c.hTim > c.tPer ? c.tPer : c.hTim;', 'const fbTim = c.hTim;'],
+    ['fallback-demand-ignored', 'S10', 'j < chpH.length && count < c.hTim', 'j < chpH.length'],
+    ['fallback-period-start-ignored', 'S10', 'hour >= i * c.tPer && hour < (i + 1) * c.tPer', 'hour < (i + 1) * c.tPer'],
+    ['fallback-period-end-ignored', 'S10', 'hour >= i * c.tPer && hour < (i + 1) * c.tPer', 'hour >= i * c.tPer'],
     ['firmware-minimum-exclusive', 'S40', 'return true; //equal versions meet the minimum requirement', 'return false; //reject equal firmware'],
     ['older-pro-firmware-accepted', 'S40', "verC('1.4.3',", "verC('1.4.2',"],
     ['forecast-user-minimum-ignored', 'S6', '_.hTim = c.hTim;', '_.hTim = 0;'],

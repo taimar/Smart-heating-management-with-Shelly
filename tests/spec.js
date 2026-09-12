@@ -624,13 +624,24 @@ for (const pack of ["PARTN24", "PARTN24PL", "PAMATA1", "SPECIAL1"]) {
     });
 }
 
-// S10. Oversized heating demand clamps to the period, including enum strings offline.
-for (const period of [6, "6"]) {
-    scenario("S10 offline period=" + JSON.stringify(period) + " clamps hours without duplicates", () => {
-        W.kvs.SmartHeatingConf1 = conf({ TimePeriod: period, HeatingTime: 10 });
+// S10. Literal schedules preserve historical preference within each period.
+// Include short final periods, fractional demand and oversized demand with enum strings.
+for (const [period, heating, expected] of [
+    [6, 10, "0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23"],
+    ["6", 10, "0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23"],
+    [4, 3, "0,1,2,4,5,6,8,9,10,12,13,14,16,17,18,21,22,23"],
+    [5, 2, "0,1,5,6,10,11,15,16,21,22"],
+    [11, 2, "0,1,11,12,22,23"],
+    [11, 2.5, "0,1,2,11,12,13,22,23"],
+    [6, 3, "0,1,2,6,7,8,12,13,14,21,22,23"],
+    [12, 8, "0,1,2,3,4,5,6,7,12,13,14,15,16,17,21,22"],
+    [24, 20, "0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,21,22"],
+]) {
+    scenario("S10 offline period=" + JSON.stringify(period) + ", demand=" + heating + " respects period boundaries", () => {
+        W.kvs.SmartHeatingConf1 = conf({ TimePeriod: period, HeatingTime: heating });
         W.http = () => [null, -114];
         const runtime = boot(); runtime.fcTm();
-        expectSchedule(runtime, "0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23");
+        expectSchedule(runtime, expected);
     });
 }
 
@@ -886,7 +897,8 @@ scenario("S18 Unsupported and missing values are never substituted or written ba
     let t;
     // Per-field invalid inputs detect omitted validation of that specific field.
     for (const [field, value] of [
-        ["TimePeriod", 8], ["TimePeriod", null], ["TimePeriod", ""], ["TimePeriod", "  "],
+        ["TimePeriod", -1], ["TimePeriod", 25], ["TimePeriod", 2.5], ["TimePeriod", true],
+        ["TimePeriod", null], ["TimePeriod", ""], ["TimePeriod", "  "],
         ["HeatingTime", null], ["HeatingTime", ""], ["HeatingTime", "  "],
         ["InvertedRelay", null], ["InvertedRelay", "false"], ["IsForecastUsed", null],
         ["AlwaysOnPrice", null], ["AlwaysOffPrice", null], ["HeatingCurve", null],
@@ -912,7 +924,7 @@ scenario("S18 Unsupported and missing values are never substituted or written ba
         check("S18 malformed configuration " + saved + " is retained without crashing",
             !t.err && W.kvs.SmartHeatingConf1 === saved && W.relayConfigs.length === 0 && W.schedules.length === 0, String(t.err || ""));
     }
-    for (const period of [0, "0", 6, "6", 12, "12", 24, "24"]) {
+    for (const period of Array.from({ length: 25 }, (_, i) => [i, String(i)]).flat()) {
         W = freshWorld(); W.http = priceServer(PRICE);
         const saved = conf({ TimePeriod: period, HeatingTime: 2 }); W.kvs.SmartHeatingConf1 = saved;
         t = boot(); t.fcTm(); t.jumpToNextDay(); t.loop();
@@ -927,6 +939,42 @@ scenario("S18 Unsupported and missing values are never substituted or written ba
     t = boot(); t.fcTm();
     check("S18 KVS numeric settings retain their wider ranges", !t.err && W.kvs.SmartHeatingConf1 === specialConfig && W.schedules.length === 1 && specHours(W.schedules[0].timespec).split(",").length === 24);
 });
+
+// Literal expectations cover restored KVS periods independently of the hour oracle.
+for (const [period, online, offline] of [
+    [1, "0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23", "0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23"],
+    [4, "0,4,8,12,16,20", "0,4,8,12,16,21"],
+    [5, "0,5,10,15,20", "0,5,10,15,21"],
+    [8, "0,8,16", "0,8,16"],
+]) {
+    for (const outage of [false, true]) {
+        scenario("S18b KVS period=" + period + ", offline=" + outage, () => {
+            W.kvs.SmartHeatingConf1 = conf({ TimePeriod: period, HeatingTime: 1, AlwaysOnPrice: -999 });
+            W.http = outage ? () => [null, -114] : priceServer(h => 10 + h);
+            const runtime = boot(); runtime.fcTm();
+            expectSchedule(runtime, outage ? offline : online);
+        });
+    }
+    scenario("S18c KVS forecast period=" + period + " starts at midnight", () => {
+        W.kvs.SmartHeatingConf1 = conf({ TimePeriod: period, HeatingTime: 1,
+            IsForecastUsed: true, AlwaysOnPrice: -999 });
+        W.http = p => p.url.includes("open-meteo")
+            ? [{ code: 200, body: '{"hourly":{"apparent_temperature":[10]}}' }, 0]
+            : priceServer(h => 10 + h)(p);
+        const runtime = boot(true); runtime.advanceBy(1500);
+        expectSchedule(runtime, "0");
+    });
+}
+
+for (const [season, eve] of [["spring", EVE.spring], ["autumn", EVE.autumn]]) {
+    scenario("S18d Four-hour KVS periods follow local hours across " + season + " DST", () => {
+        FIXED_MS = new RealDate(eve).getTime(); W = freshWorld();
+        W.kvs.SmartHeatingConf1 = conf({ TimePeriod: 4, HeatingTime: 1, AlwaysOnPrice: -999 });
+        W.http = priceServer(h => 10 + h);
+        const runtime = boot(); runtime.fcTm();
+        expectSchedule(runtime, "0,4,8,12,16,20");
+    });
+}
 
 scenario("S19 A failed read is distinct from a confirmed missing key, including after a successful cycle", () => {
     let t;
@@ -1223,7 +1271,7 @@ scenario("S28 An invisible added control stops this cycle; partial controls need
 
 scenario("S29 Only KVS mode validates the nine KVS heating values; mode/relay must always be known", () => {
     let t;
-    for (const badSettings of [{ TimePeriod: 8 }, { EnergyProvider: "PARTN24P" }, { HeatingTime: null }, { Country: undefined }]) {
+    for (const badSettings of [{ TimePeriod: 25 }, { EnergyProvider: "PARTN24P" }, { HeatingTime: null }, { Country: undefined }]) {
         vcWorld(); W.vcs = controlFixture();
         const saved = conf(Object.assign({ ManualKVS: false }, badSettings)); W.kvs.SmartHeatingConf1 = saved;
         t = boot(true); t.fcTm(); t.flush();
@@ -1393,6 +1441,33 @@ scenario("S40b The mode diagnostic explains why controls are unavailable", () =>
     }
 });
 
+for (const device of [
+    { gen: 2, app: "Pro1", ver: "1.4.3" },
+    { gen: 3, app: "Mini1G3", ver: "1.4.4" },
+]) {
+    scenario("S40c " + device.app + " retains saved KVS settings when no heating controls exist", () => {
+        W.device = device; W.http = priceServer(PRICE);
+        // These values cannot all be represented by virtual controls.
+        const saved = conf({ ManualKVS: false, TimePeriod: 4, HeatingTime: 2,
+            AlwaysOnPrice: -10, AlwaysOffPrice: 600, HeatingCurve: 10, InvertedRelay: true, RelayId: 1 });
+        W.kvs.SmartHeatingConf1 = saved;
+        for (const restart of [false, true]) {
+            const runtime = boot(); runtime.fcTm();
+            expectSchedule(runtime, "0,1,4,7,8,11,14,15,18,19,21,22", { inverted: true, relayId: 1 });
+            assert.equal(W.kvs.SmartHeatingConf1, saved, "saved KVS settings stay unchanged across restart=" + restart);
+            assert.equal(W.addAttempts.length, 0, "no default controls are installed");
+        }
+        assert.ok(prints.some(line => line.includes("Script in KVS mode") && line.includes("saved KVS settings")),
+            "diagnostic explains why saved KVS settings remain active");
+        // Explicitly choosing a fresh VC installation must also work without a restart.
+        W.kvs.SmartHeatingConf1 = JSON.stringify({ ManualKVS: false, RelayId: 1 });
+        const runtime = runtimes[runtimes.length - 1];
+        runtime.jumpToNextDay(); runtime.loop();
+        assert.ok(completeGroup(), "explicit switch installs virtual controls");
+        assert.equal(W.vcs.find(v => v.key === "enum:200").status.value, "24", "explicit switch installs defaults");
+    });
+}
+
 scenario("S42 Price-only mode cannot derive historical heating hours; preserve the prior relay and schedule", () => {
     let t;
     for (const inverted of [false, true]) {
@@ -1456,7 +1531,7 @@ scenario("N1 Fresh installation preserves foreign controls and respects RPC/time
     for (const hasSystemData of [false, true]) {
         vcWorld(); W.pageSize = 3; W.ignoreKeys = true; W.vcs = manyForeign(4);
         if (hasSystemData) existingHeating();
-        W.kvs.SmartHeatingConf1 = conf({ ManualKVS: false });
+        W.kvs.SmartHeatingConf1 = JSON.stringify({ ManualKVS: false, RelayId: 0 });
         const foreignBefore = JSON.stringify(W.vcs);
         t = boot(true); t.fcTm(); const limits = t.flush();
         check("N1 empty slots, SystemData=" + hasSystemData + ": install defaults and schedule heating", !t.err &&

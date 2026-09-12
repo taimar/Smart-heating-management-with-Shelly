@@ -51,7 +51,7 @@
 ## Põhifunktsioonid
 
 1. **Ilmaprognoosiga küte:** arvutab küttetundide arvu prognoositava tajutava temperatuuri järgi.
-2. **Fikseeritud kütteperioodid:** valib odavaimad tunnid iga 6-, 12- või 24-tunnise perioodi sees.
+2. **Fikseeritud kütteperioodid:** valib odavaimad tunnid määratud perioodi sees (KVS-is 1–24 täistundi; rakenduses 6, 12 või 24).
 3. **Hinnapiirid:** lisab või välistab küttetunde määratud börsihinna lävendite järgi.
 4. **Kaks skripti ühel seadmel:** võimaldab juhtida eri küttevajadusi; vaata [kahe installatsiooni juhiseid](#kuidas-panna-tööle-kaks-installatsiooni).
 
@@ -93,7 +93,7 @@ Pärast kütte ajakava edukat kustutamist seab watchdog `ExistingSchedule` vää
 
 Virtuaalkomponendid võimaldavad muuta üheksat kütteseadet Shelly rakenduses. `RelayId` valitakse mõlemas režiimis KVS-kirjes.
 
-Skript valib virtuaalkomponentide režiimi Gen2 Pro seadmetel alates püsivarast 1.4.3 ning Gen3/Gen4 seadmetel põlvkonna järgi, kui KVS-režiim pole käsitsi valitud. Paigaldusjuhend eeldab püsivara 1.4.4 või uuemat; see režiimi valiku kontroll ei ole täielik ühilduvustest.
+Virtuaalkomponendid on saadaval Gen2 Pro seadmetel alates püsivarast 1.4.3 ning Gen3/Gen4 seadmetel põlvkonna järgi. Kui KVS-režiim pole käsitsi valitud, kasutatakse olemasolevate juhtkomponentide kütteseadeid. Kui juhtkomponente pole ning salvestatud KVS-seadistus on täielik ja korrektne, jääb see aktiivseks; skript ei asenda seda vaikeväärtustega. Paigaldusjuhend eeldab püsivara 1.4.4 või uuemat; see režiimi valiku kontroll ei ole täielik ühilduvustest.
 
 <img src="images/ShellyVirtualComponents.jpg" alt="Shelly virtuaalkomponendid" width="700">
 
@@ -136,7 +136,7 @@ Arvud sisesta JSON-arvudena (`10`), tõeväärtused kujul `true` või `false`. I
 <a name="heating-parameters"></a>
 #### Kütteparameetrid
 
-`TimePeriod` toetatud väärtused on **0, 6, 12 ja 24**. Prognoosita määrab `HeatingTime` valitavate tundide arvu perioodis; prognoosiga on see miinimum, mida rakendatakse ainult positiivse küttevajaduse korral. Hinnapiirid võivad valitud tundide arvu muuta. Tabeli kasutusnäited on lähtepunkt seadistamiseks.
+`TimePeriod` lubab KVS-is täisarve **0 kuni 24**, sealhulgas 4 ja 8; virtuaalkomponentides saab valida **0, 6, 12 või 24**. Null valib ainult hinnapiiridel põhineva režiimi. Perioodid algavad keskööl; kui 24 ei jagu perioodi pikkusega, lõpeb viimane periood keskööl. Prognoosita määrab `HeatingTime` valitavate tundide arvu perioodis; prognoosiga on see miinimum, mida rakendatakse ainult positiivse küttevajaduse korral. Hinnapiirid võivad valitud tundide arvu muuta. Tabeli kasutusnäited on lähtepunkt seadistamiseks.
 
 | Kütte režiim | Kirjeldus | Parim kasutus |
 | --- | --- | --- |
@@ -209,7 +209,7 @@ Virtuaalkomponentide paigaldus sõltub üheksa nõutud juhtkomponendi seisust. K
 | Nõutud juhtkomponendid | Tegevus |
 | --- | --- |
 | Kõik üheksa on olemas ja korrektsed | Kasutatakse nende väärtusi kütte juhtimiseks. |
-| Kõik üheksa puuduvad | Paigaldatakse vaikeväärtused, ka KVS-režiimist üleminekul olemasoleva SystemData kirjega. |
+| Kõik üheksa puuduvad | Täielik ja korrektne salvestatud KVS-seadistus jääb aktiivseks. Muul juhul paigaldatakse vaikeväärtused. |
 | Osa puudub | Ajakava uuendamine peatub ning teade **„Missing controls”** nimetab kõik puuduvad juhtkomponendid, sõltumata SystemData olemasolust. |
 | Vigased või konfliktse nimega komponendid, ebaõnnestunud või mittetäielik lugemine | Komponente, releeseadeid ja ajakava ei muudeta. |
 
@@ -217,7 +217,7 @@ Virtuaalkomponentide paigaldus sõltub üheksa nõutud juhtkomponendi seisust. K
 
 Mittetäieliku komponentide loendi korral juhtkomponente, releeseadeid ja ajakava ei muudeta; skript proovib lugemist viie minuti pärast uuesti. Taasta juhtkomponent käsitsi ainult siis, kui see tegelikult puudub.
 
-Kui katkenud paigalduse järel on osa juhtkomponente puudu, ei taasta korduskatse ega taaskäivitus neid automaatselt. Taasta teates nimetatud juhtkomponendid käsitsi või [mine üle KVS-režiimi](#skripti-kvs-häälestamine), säilitades praegused seaded. Teadlikuks vaikeväärtustega taaspaigalduseks kustuta kõik üheksa nõutud juhtkomponenti ja taaskäivita skript. **Säilita `SmartHeatingSys<ScriptId>` (SystemData): see sisaldab ajakava ID-d.** SystemData kustutamine ei taasta osalist juhtkomponentide komplekti. Kui ühtki juhtkomponenti ei jõutud luua, võib järgmine arvutus paigaldust uuesti proovida.
+Kui katkenud paigalduse järel on osa juhtkomponente puudu, ei taasta korduskatse ega taaskäivitus neid automaatselt. Taasta teates nimetatud juhtkomponendid käsitsi või [mine üle KVS-režiimi](#skripti-kvs-häälestamine), säilitades praegused seaded. Vaikeväärtustega paigalduseks või taaspaigalduseks varunda seaded, kustuta kõik üheksa nõutud juhtkomponenti ning asenda seadistuskirje kujuga `{ "ManualKVS": false, "RelayId": 0 }`, kasutades oma relee tegelikku ID-d. Taaskäivita skript ja seadista uued juhtkomponendid. **Säilita `SmartHeatingSys<ScriptId>` (SystemData): see sisaldab ajakava ID-d.** SystemData kustutamine ei taasta osalist juhtkomponentide komplekti. Kui ühtki juhtkomponenti ei jõutud luua, võib järgmine arvutus paigaldust uuesti proovida.
 
 **„Group setup incomplete”** tähendab, et grupp vajab käsitsi seadistamist; kütte juhtimine saab jätkuda. Olemasoleva grupi nimi ja liikmed säilivad. Vajadusel loo grupp või lisa juhtkomponendid sinna käsitsi, ka siis, kui grupp jäi taaskäivituse tõttu puudu või tühjaks. Kui kõik juhtkomponendid on olemas, ei proovita gruppi järgmistel arvutustel ega taaskäivitustel uuesti seadistada.
 
@@ -246,7 +246,7 @@ Esimene installatsioon võib kasutada virtuaalkomponente; teine tuleb samal sead
 
 ## Skripti uuendamine
 
-Enne uuendamist kontrolli aktiivseid seadeid. `TimePeriod` toetatud väärtused on **0, 6, 12 ja 24**. Vanemates versioonides töötanud muu väärtus, näiteks 8, peatab ajakava uuendamise kuni kasutaja valib toetatud perioodi. Skript ei teisenda seda automaatselt. `HeatingTime` määratakse iga perioodi kohta; perioodi muutmisel vaata üle ka see väärtus.
+Enne uuendamist kontrolli aktiivseid seadeid. KVS-is on lubatud `TimePeriod` täisarvulised väärtused **0 kuni 24**; senised 4- ja 8-tunnised perioodid jäävad toetatuks. `HeatingTime` määratakse iga perioodi kohta; perioodi muutmisel vaata üle ka see väärtus. Kui uuendus teeb virtuaalkomponendid kättesaadavaks, jääb täielik ja korrektne KVS-seadistus aktiivseks, kuni juhtkomponente pole.
 
 Enne uuendamist kontrolli ka [seadistuskirjet](#skripti-kvs-häälestamine): arvud peavad olema JSON-arvud, tõeväärtused `true` või `false`, `Country` toetatud riigikood ja `RelayId` mittenegatiivne täisarv. Virtuaalkomponentide režiimis peavad salvestatud režiim ja relee ID olema korrektsed. Õiged paketinimed on `PARTN24PL` ja `PARTN12PL`; varasema juhendi lühemad kirjapildid olid vead.
 
@@ -288,7 +288,7 @@ flowchart TD
 
 ## Testitud rikkestsenaariumid
 
-- Kui ajaperioodiga režiimis ei saa hindu või vajalikku ilmaprognoosi, kasutab skript `HeatingTime` alusel ajalooliselt odavamate tundide varuajakava. Väärtus `HeatingTime: 0` eemaldab sel juhul kütte ajakava.
+- Kui ajaperioodiga režiimis ei saa hindu või vajalikku ilmaprognoosi, koostab skript iga perioodi jaoks varuajakava ajaloolise hinnajärjestuse ja `HeatingTime` alusel. Valik piirdub selle perioodi tundidega. Väärtus `HeatingTime: 0` eemaldab sel juhul kütte ajakava.
 - Ainult hinnapiiridel põhinevas režiimis (`TimePeriod: 0`) peatub hindade puudumisel ajakava uuendamine. Olemasolev ajakava ja releeseaded säilivad; varuajakava ei kasutata.
 - Konfiguratsiooni või SystemData lugemisvea korral väljastatakse **„Schedule updates are paused”**. Juhtkomponendid, releeseaded ja ajakava jäävad muutmata.
 - Voolukatkestuse järel ootab skript seadme kellaaega umbes 30 sekundit. Kui kellaaega ikka pole, kasutab ajaperioodiga režiim ülaltoodud varuajakava; ainult hinnapiiridel põhinev režiim peatab uuendamise.
@@ -350,7 +350,7 @@ Märkus: Shelly asukoht määratakse teie internetiteenuse pakkuja IP-aadressi p
 1. `T` on prognoositud tajutavate temperatuuride keskmine, ümardatud üles.
 2. Päevane vajadus tundides = `(16 − T) × pFac + 2 × HeatingCurve − 2`. `pFac` on vaikimisi `0.5` ja seda muudetakse skriptis.
 3. Kui `T > 16` või tulemus on negatiivne, on päevane vajadus `0`.
-4. Jaga päevane vajadus perioodide arvuga (`24 / TimePeriod`) ja ümarda alla.
+4. Jaga päevane vajadus perioodide arvuga (`24 / TimePeriod`, ümardatud üles) ja ümarda tulemus alla.
 5. Positiivse päevase vajaduse korral tõsta tulemus vajadusel miinimumini `HeatingTime`.
 6. Tulemus ei tohi ületada perioodi pikkust.
 
@@ -368,7 +368,7 @@ Igas kütteperioodis valitakse võrdse arvutatud hinnaga (koos võrgutasuga) tun
 
 * 24-tunnine graafik ja kuidas 10 kõige odavamat tundi valitakse, on näitena kujutatud järgmisel pildil. Punane tähistab kütmiseks kasutatavaid tunde.
 
-<img src="images/Heating24_10.jpg" alt="Kütteperiood 24 tundi" width="750">
+<img src="images/Heating24_10.png" alt="Kütteperiood 24 tundi" width="750">
 
 # Kas see tõesti vähendab minu elektriarveid
 

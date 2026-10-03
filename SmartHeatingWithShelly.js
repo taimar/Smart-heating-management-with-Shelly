@@ -370,6 +370,10 @@ function rSys(res, err, msg) {
     if (err !== 0 || !res) { print(_.pId, "SystemData read failed:", err, msg); return; }
     try {
         const saved = JSON.parse(res.value);
+        if (saved && typeof saved === "object" && saved.ExistingSchedule === "" &&
+            nOk(saved.Version) && saved.Version >= 4.2 && saved.Version < 5) {
+            saved.ExistingSchedule = 0;
+        }
         if (!saved || !idOk(saved.ExistingSchedule)) {
             print(_.pId, "Invalid SystemData: ExistingSchedule must be a non-negative integer."); return;
         }
@@ -1055,6 +1059,8 @@ function srAr(arr, sort) {
 
 // Handle errors by logging and setting manual mode.
 function hErr(msg) {
+    _.tsPr = 0;
+    if (c.isFc) { _.tsFc = 0; }
     if (c.tPer === 0) {
         rErr("Threshold-only mode needs current prices; no historical-hour fallback is defined. Relay settings and any existing schedule are left unchanged. " + msg);
         return;
@@ -1190,7 +1196,7 @@ function putC(res, err, msg, data) {
         print(_.pId, "Watchdog script not created:", msg, ". Schedule will not be deleted if heating script is stopped or deleted.");
         _.isLp = false;
     } else {
-        let code = 'function strt(e){Shelly.call("KVS.Get",{key:"SmartHeatingSys"+e},(function(t,l,n,i){0===l&&t&&delS(JSON.parse(t.value),i.id)}),{id:e})}function delS(e,t){let l=e.ExistingSchedule;l>0&&Shelly.call("Schedule.Delete",{id:l},(function(e,t,l,n){if(0!==t){print("Script #"+n.scId,"schedule ",n.id," deletion by watchdog failed.");return}print("Script #"+n.scId,"schedule ",n.id," deleted by watchdog."),updK(n.sDat,n.scId)}),{id:l,scId:t,sDat:e})}function updK(e,t){e.ExistingSchedule=0,Shelly.call("KVS.set",{key:"SmartHeatingSys"+t,value:JSON.stringify(e)})}Shelly.addStatusHandler((function(e){"script"===e.name&&!e.delta.running&&strt(e.id)}));'
+        let code = "function strt(t){Shelly.call(\"KVS.Get\",{key:\"SmartHeatingSys\"+t},function(t,e,i,n){if(0===e&&t){let e;try{e=JSON.parse(t.value)}catch(t){return void print(\"Script #\"+n.id,\"SystemData is not valid JSON.\")}const i=e&&e.ExistingSchedule;if(!e||\"object\"!=typeof e||\"number\"!=typeof i||i-i!==0||i<0||i%1!=0)return void print(\"Script #\"+n.id,\"Invalid SystemData schedule ID.\");const d=Shelly.getComponentStatus(\"script\",n.id);if(d&&d.running)return;delS(e,n.id,t.etag)}},{id:t})}function delS(t,e,i){const n=t.ExistingSchedule;n>0&&Shelly.call(\"Schedule.Delete\",{id:n},function(t,e,i,n){0===e?(print(\"Script #\"+n.scId,\"schedule \",n.id,\" deleted by watchdog.\"),updK(n.sDat,n.scId,n.etag)):print(\"Script #\"+n.scId,\"schedule \",n.id,\" deletion by watchdog failed.\")},{id:n,scId:e,sDat:t,etag:i})}function updK(t,e,i){\"string\"==typeof i&&\"\"!==i?(t.ExistingSchedule=0,Shelly.call(\"KVS.set\",{key:\"SmartHeatingSys\"+e,value:JSON.stringify(t),etag:i},function(t,i,n){0!==i&&print(\"Script #\"+e,\"SystemData not cleared; record may have changed:\",n)})):print(\"Script #\"+e,\"SystemData not cleared: missing etag.\")}Shelly.addStatusHandler(function(t){\"script\"!==t.name||t.delta.running||strt(t.id)});";
         const id = res.id > 0 ? res.id : data.id;   //get the script ID
         Shelly.call('Script.PutCode', { id: id, code: code }, function (res, err, msg, data) {
             if (err === 0) {

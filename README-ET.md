@@ -82,7 +82,7 @@ Seadme veebilehel **Advanced → KVS** asub üks JSON-kirje `SmartHeatingSys<Scr
 
 `LastCalculation` märgib hinnapõhise ajakava, varuajakava, küttetundideta tulemuse või ajakava loomise ebaõnnestumise aega. Salvestamise korduskatsetel ajatempel ei muutu: see näitab tulemuse, mitte hilisema salvestamise aega. See ei kinnita edukat hindade päringut ega tegelikku kütmist.
 
-Pärast kütte ajakava edukat kustutamist seab watchdog `ExistingSchedule` väärtuseks `0`, jättes `LastCalculation` muutmata.
+Pärast kütte ajakava edukat kustutamist seab watchdog tingimusliku kirjutamisega `ExistingSchedule` väärtuseks `0`, jättes `LastCalculation` muutmata. Kui teine arvutus on kirjet muutnud või KVS ei tagasta `etag` väärtust, jääb kirje puutumata. Vigane JSON või ajakava ID logitakse, kuid teiste skriptide ajakavade puhastamine jätkub. Hilinenud kustutamine jäetakse vahele, kui kütteskript kontrolli hetkel juba töötab.
 
 <img src="images/KvsSystem.jpg" alt="SystemData väljad ühes KVS-i JSON-kirjes" width="750">
 
@@ -250,7 +250,7 @@ Enne uuendamist kontrolli aktiivseid seadeid. KVS-is on lubatud `TimePeriod` tä
 
 Enne uuendamist kontrolli ka [seadistuskirjet](#skripti-kvs-häälestamine): arvud peavad olema JSON-arvud, tõeväärtused `true` või `false`, `Country` toetatud riigikood ja `RelayId` mittenegatiivne täisarv. Virtuaalkomponentide režiimis peavad salvestatud režiim ja relee ID olema korrektsed. Õiged paketinimed on `PARTN24PL` ja `PARTN12PL`; varasema juhendi lühemad kirjapildid olid vead.
 
-Veel avaldamata versioon **5** eemaldab automaatse taastamise varukoopiast. Versioon salvestatakse logimise ja diagnostika jaoks; versiooninumber ei käivita andmete teisendamist. `SmartHeatingVC<ScriptId>` on aegunud: skript ei loe ega kirjuta seda võtit ning selle võib kustutada. Olemasolevate juhtkomponentide väärtused säilivad.
+Veel avaldamata versioon **5** eemaldab automaatse taastamise varukoopiast. Tühja stringina salvestatud ajakava ID tähendab ajakava puudumist ainult siis, kui kirje arvuline versioon on vähemalt 4.2 ja alla 5. Nullväärtus, puuduv ID ja muud vigased ID-d peatavad uuendamise. See ühilduvusreegel kehtib ainult olemasolevale `SmartHeatingSys<ScriptId>` kirjele. `SmartHeatingVC<ScriptId>` on aegunud: skript ei loe ega kirjuta seda võtit ning selle võib kustutada. Olemasolevate juhtkomponentide väärtused säilivad.
 
 > [!WARNING]
 > Otsest uuendamist versioonilt 4.1 ei toetata, sest KVS-i andmevorming muutus JSON-iks. Pärast paigaldamist seadista kõik väärtused uuesti KVS-is või virtuaalkomponentides.
@@ -292,7 +292,7 @@ flowchart TD
 - Ainult hinnapiiridel põhinevas režiimis (`TimePeriod: 0`) peatub hindade puudumisel ajakava uuendamine. Olemasolev ajakava ja releeseaded säilivad; varuajakava ei kasutata.
 - Konfiguratsiooni või SystemData lugemisvea korral väljastatakse **„Schedule updates are paused”**. Juhtkomponendid, releeseaded ja ajakava jäävad muutmata.
 - Voolukatkestuse järel ootab skript seadme kellaaega umbes 30 sekundit. Kui kellaaega ikka pole, kasutab ajaperioodiga režiim ülaltoodud varuajakava; ainult hinnapiiridel põhinev režiim peatab uuendamise.
-- Kellaaja sünkroonimisel proovib skript uuesti arvutada. Ebaõnnestunud päringuid proovitakse uuesti viieminutilise intervalliga.
+- Kellaaja sünkroonimisel proovib skript uuesti arvutada. Ebaõnnestunud päringuid proovitakse uuesti viieminutilise intervalliga ka pärast südaööd, kui tõrge algas eelmisel õhtul. Korduv tõrge säilitab paigaldatud varuajakava, mitte ei loo seda uuesti.
 
 # Maasoojuspumpade Thermia Villa & Eko Classic nutikas kütmine Shelly abil
 

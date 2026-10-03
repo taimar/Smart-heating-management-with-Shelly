@@ -659,66 +659,69 @@ for (const ignoreKeys of [false, true]) {
     });
 }
 
-scenario("S12 watchdog stops delete only the stopped script's schedule and retain failed IDs", () => {
-    let t;
-    W = freshWorld();
-    W.kvs["SmartHeatingConf1"] = conf();
-    W.http = priceServer(PRICE);
-    t = boot();
-    t.fcTm(); // the install captured the code in W.wdCode
-    {
-        const code = W.wdCode;
-        function wdWorld() {
-            return {
-                kvs: {
-                    SmartHeatingSys1: JSON.stringify({ ExistingSchedule: 71, Version: 4.9 }),
-                    SmartHeatingSys2: JSON.stringify({ ExistingSchedule: 72, Version: 4.9 }),
-                },
-                schedules: [71, 72], failDel: {},
-            };
+function watchdogWorld() {
+    return { kvs: {
+        SmartHeatingSys1: JSON.stringify({ ExistingSchedule: 71, Version: 4.9, LastCalculation: "attempt" }),
+        SmartHeatingSys2: JSON.stringify({ ExistingSchedule: 72, Version: 4.9 }),
+    }, schedules: [71, 72], failDel: {}, running: {}, calls: [], logs: [] };
+}
+function kvTag(value) {
+    return require("crypto").createHash("sha256").update(JSON.stringify(value)).digest("hex");
+}
+function watchdogSandbox(code, w) {
+    const queue = [];
+    let handler;
+    const S = {
+        addStatusHandler: h => { handler = h; },
+        getComponentStatus: (name, id) => ({ running: !!w.running[id] }),
+        call: (method, params, cb, data) => {
+            w.calls.push({ method, params });
+            queue.push(() => {
+                const done = (res, err = 0) => { if (cb) cb(res, err, err ? "forced failure" : "", data); };
+                if (method === "KVS.Get") return w.kvs[params.key] === undefined ? done(null, -105)
+                    : done({ value: w.kvs[params.key], etag: w.noEtag ? undefined : kvTag(w.kvs[params.key]) });
+                if (method.toLowerCase() === "kvs.set") {
+                    if (params.etag !== undefined && (w.kvs[params.key] === undefined || params.etag !== kvTag(w.kvs[params.key]))) return done(null, -1);
+                    w.kvs[params.key] = params.value; return done({ etag: kvTag(params.value) });
+                }
+                if (method === "Schedule.Delete") {
+                    if (w.failDel[params.id]) return done(null, -1);
+                    const index = w.schedules.indexOf(params.id);
+                    if (index === -1) return done(null, -103);
+                    w.schedules.splice(index, 1); return done({});
+                }
+                throw new Error("unstubbed watchdog method " + method);
+            });
+        },
+    };
+    new Function("Shelly", "print", code)(S, (...args) => w.logs.push(args.join(" ")));
+    return { fire: id => handler({ name: "script", id, delta: { running: false } }),
+        step: () => { if (queue.length) queue.shift()(); },
+        flush: () => { let count = 0; while (queue.length && count++ < 100) queue.shift()(); assert.equal(queue.length, 0); } };
+}
+const watchdogCopies = ["watchdog.js", "watchdog-min.js"].map(name =>
+    [name, fs.readFileSync(require("path").join(__dirname, "../files", name), "utf8")]);
+scenario("S12 watchdog deletes only the stopped script's schedule and retains failed IDs", () => {
+    for (const [name, code] of watchdogCopies) {
+        for (const failed of [false, true]) {
+            const w = watchdogWorld(), sb = watchdogSandbox(code, w);
+            w.failDel[71] = failed; sb.fire(1); sb.flush();
+            assert.deepEqual(w.schedules, failed ? [71, 72] : [72], name);
+            const saved = JSON.parse(w.kvs.SmartHeatingSys1);
+            assert.equal(saved.ExistingSchedule, failed ? 71 : 0, name);
+            assert.equal(saved.LastCalculation, "attempt", name);
         }
-        function sandbox(w) {
-            const q = [];
-            let handler = null;
-            const S = {
-                addStatusHandler: h => { handler = h; },
-                call: (m, p, cb, ud) => {
-                    q.push(() => {
-                        const done = (r, e, ms) => { if (cb) cb(r, e || 0, ms || "", ud); };
-                        if (m === "KVS.Get") return w.kvs[p.key] !== undefined ? done({ value: w.kvs[p.key] }, 0) : done(null, -105, "");
-                        if (m === "KVS.set" || m === "KVS.Set") { w.kvs[p.key] = p.value; return done({}, 0); }
-                        if (m === "Schedule.Delete") {
-                            if (w.failDel[p.id]) return done(null, -1, "fail");
-                            const ix = w.schedules.indexOf(p.id);
-                            if (ix === -1) return done(null, -103, "");
-                            w.schedules.splice(ix, 1); return done({}, 0);
-                        }
-                        throw new Error("wd unstubbed " + m);
-                    });
-                },
-            };
-            new Function("Shelly", "print", code)(S, () => { });
-            return { fire: e => handler(e), flush: () => { let g = 0; while (q.length && g++ < 100) q.shift()(); } };
-        }
-        let w = wdWorld(), sb = sandbox(w);
-        sb.fire({ name: "script", id: 1, delta: { running: false } });
-        sb.flush();
-        check("S12 stop deletes the schedule and clears the stored id",
-            JSON.stringify(w.schedules) === "[72]" && JSON.parse(w.kvs.SmartHeatingSys1).ExistingSchedule === 0, w.kvs.SmartHeatingSys1);
-        w = wdWorld(); w.failDel[71] = true; sb = sandbox(w);
-        sb.fire({ name: "script", id: 1, delta: { running: false } });
-        sb.flush();
-        check("S12 failed deletion keeps the stored id for a retry",
-            JSON.parse(w.kvs.SmartHeatingSys1).ExistingSchedule === 71, w.kvs.SmartHeatingSys1);
-        w = wdWorld(); sb = sandbox(w);
-        sb.fire({ name: "script", id: 1, delta: { running: false } });
-        sb.fire({ name: "script", id: 2, delta: { running: false } });
-        sb.flush();
-        check("S12 concurrent stops update each script's own record",
-            w.schedules.length === 0 && JSON.parse(w.kvs.SmartHeatingSys1).ExistingSchedule === 0 &&
-            JSON.parse(w.kvs.SmartHeatingSys2).ExistingSchedule === 0,
-            [w.kvs.SmartHeatingSys1, w.kvs.SmartHeatingSys2]);
+        const w = watchdogWorld(), sb = watchdogSandbox(code, w);
+        sb.fire(1); sb.fire(2); sb.flush();
+        assert.deepEqual(w.schedules, [], name);
+        assert.equal(JSON.parse(w.kvs.SmartHeatingSys1).ExistingSchedule, 0, name);
+        assert.equal(JSON.parse(w.kvs.SmartHeatingSys2).ExistingSchedule, 0, name);
     }
+});
+scenario("S12a installed watchdog matches the tested minified artifact", () => {
+    W.kvs.SmartHeatingConf1 = conf(); W.http = priceServer(PRICE);
+    const runtime = boot(); runtime.fcTm();
+    assert.equal(W.wdCode.trim(), watchdogCopies[1][1].trim());
 });
 
 scenario("S13 A healthy watchdog needs no script RPCs; stopped code restarts without a rewrite", () => {
@@ -2013,6 +2016,75 @@ scenario("S56 unequal prices select two hours in each six-hour period", () => {
     assert.equal(cheapest(EVE.normal, 6, 2, h => prices[h]), expected, "oracle agrees with hand-ranked periods");
 });
 
+scenario("S57 legacy empty schedule IDs migrate only from JSON-era versions", () => {
+    for (const version of [4.2, 4.5, 4.8, 4.9, 4.1, 5, 6, "4.9", null, undefined]) {
+        W = freshWorld(); W.http = priceServer(PRICE); W.kvs.SmartHeatingConf1 = conf();
+        const record = JSON.stringify({ ExistingSchedule: "", Version: version });
+        W.kvs.SmartHeatingSys1 = record;
+        const runtime = boot(); runtime.fcTm();
+        assert.ifError(runtime.err);
+        if ([4.2, 4.5, 4.8, 4.9].includes(version)) {
+            expectSchedule(runtime, cheapest(EVE.normal, 24, 10, PRICE));
+            assert.equal(JSON.parse(W.kvs.SmartHeatingSys1).ExistingSchedule, W.schedules[0].id);
+        } else {
+            assert.equal(W.schedules.length, 0, String(version));
+            assert.equal(W.kvs.SmartHeatingSys1, record, String(version));
+        }
+    }
+});
+scenario("S58 an evening outage continues retries after midnight", () => {
+    for (const [period, forecast, failure] of [[24, false, "price"], [24, true, "price"], [6, true, "forecast"], [0, false, "price"]]) {
+        FIXED_MS = RealDate.parse("2026-01-13T22:50:00+02:00"); W = freshWorld();
+        W.kvs.SmartHeatingConf1 = conf({ TimePeriod: period, HeatingTime: 2, IsForecastUsed: forecast, AlwaysOnPrice: period === 0 ? 20 : 1 });
+        let offline = false;
+        W.http = p => {
+            const weather = p.url.includes("open-meteo");
+            if (offline && (weather ? failure === "forecast" : failure === "price")) return [null, -114];
+            return weather ? [{ code: 200, body: '{"apparent_temperature":[10,10]}' }, 0] : priceServer(PRICE2)(p);
+        };
+        const runtime = boot(true); runtime.advanceBy(1500);
+        offline = true;
+        runtime.advanceTo(RealDate.parse("2026-01-13T23:06:00+02:00"));
+        const fallback = JSON.stringify(W.schedules);
+        runtime.advanceTo(RealDate.parse("2026-01-13T23:59:00+02:00"));
+        assert.equal(JSON.stringify(W.schedules), fallback, "outage does not reinstall fallback");
+        offline = false;
+        const count = W.calls.filter(c => c.method === "HTTP.GET").length;
+        runtime.advanceTo(RealDate.parse("2026-01-14T00:06:00+02:00"));
+        assert.ifError(runtime.err);
+        assert.ok(W.calls.filter(c => c.method === "HTTP.GET").length > count, "retry crosses midnight: " + [period, forecast, failure]);
+        assert.ok(W.schedules.some(s => s.enable), "calculated heating resumes");
+    }
+});
+scenario("S59 malformed watchdog records do not stop other cleanup", () => {
+    for (const [name, code] of watchdogCopies) {
+        for (const value of ["{", "null", "[]", "false", "1", '"text"', "{}", '{"ExistingSchedule":null}', '{"ExistingSchedule":"71"}', '{"ExistingSchedule":-1}', '{"ExistingSchedule":1.5}', '{"ExistingSchedule":1e400}']) {
+            const w = watchdogWorld(); w.kvs.SmartHeatingSys1 = value;
+            const sb = watchdogSandbox(code, w);
+            sb.fire(1); assert.doesNotThrow(() => sb.flush(), name + " " + value);
+            assert.deepEqual(w.schedules, [71, 72]); assert.equal(w.kvs.SmartHeatingSys1, value);
+            assert.ok(w.logs.some(line => line.includes("1") && /invalid|JSON/i.test(line)), name + " diagnostic");
+            sb.fire(2); sb.flush(); assert.deepEqual(w.schedules, [71]);
+        }
+    }
+});
+scenario("S60 watchdog cannot clear newer records or clean up a restarted script", () => {
+    for (const [name, code] of watchdogCopies) {
+        let w = watchdogWorld(), sb = watchdogSandbox(code, w);
+        sb.fire(1); sb.step(); sb.step();
+        const newer = JSON.stringify({ ExistingSchedule: 73, Version: 5, LastCalculation: "new" });
+        w.kvs.SmartHeatingSys1 = newer; w.schedules.push(73); sb.flush();
+        assert.equal(w.kvs.SmartHeatingSys1, newer, name + " conditional clear");
+        assert.deepEqual(w.schedules, [72, 73]);
+        w = watchdogWorld(); w.noEtag = true; sb = watchdogSandbox(code, w);
+        const old = w.kvs.SmartHeatingSys1; sb.fire(1); sb.flush();
+        assert.equal(w.kvs.SmartHeatingSys1, old, name + " missing etag preserves record");
+        w = watchdogWorld(); sb = watchdogSandbox(code, w); sb.fire(1);
+        w.running[1] = true; sb.flush();
+        assert.deepEqual(w.schedules, [71, 72], name + " restarted script");
+    }
+});
+
 const options = process.argv.slice(3);
 const filter = options.find(arg => arg.startsWith("--filter="))?.slice("--filter=".length);
 const selected = scenarios.filter(({ name }) => !filter || name.startsWith(filter));
@@ -2028,4 +2100,4 @@ if (options.includes("--list")) {
 for (const test of selected) runScenario(test);
 
 console.log(failures === 0 ? "\nALL SPEC CHECKS PASSED" : "\n" + failures + " SPEC FAILURES");
-process.exit(failures === 0 ? 0 : 1);
+process.exitCode = failures === 0 ? 0 : 1;

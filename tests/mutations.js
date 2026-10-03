@@ -8,6 +8,8 @@ const sourcePath = path.resolve(process.argv[2] || path.join(__dirname, '..', 'S
 const source = fs.readFileSync(sourcePath, 'utf8');
 const suite = path.join(__dirname, 'spec.js');
 const mutations = [
+    ['legacy-empty-id-rejected', 'S57', 'saved.ExistingSchedule = 0;', 'saved.ExistingSchedule = "";'],
+    ['fallback-price-timestamp-retained', 'S58', 'function hErr(msg) {\n    _.tsPr = 0;', 'function hErr(msg) {'],
     ['kvs-four-hour-period-rejected', 'S18', 'period > 24', 'period > 24 || period === 4'],
     ['one-hour-forecast-skips-midnight', 'S18c',
         'Math.floor(((new Date().getHours() + 1) % 24) / c.tPer) + 1',

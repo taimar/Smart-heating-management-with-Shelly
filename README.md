@@ -81,7 +81,7 @@ In the device web interface, **Advanced → KVS** contains one JSON record named
 
 `LastCalculation` records the time of a price-based schedule, an offline fallback, no heating hours, or a failed schedule creation. The timestamp stays the same through save retries, so it records the result time rather than the eventual save time. It does not prove that prices were retrieved successfully or that heating occurred.
 
-After successfully deleting the heating schedule, the watchdog sets `ExistingSchedule` to `0` without changing `LastCalculation`.
+After successfully deleting the heating schedule, the watchdog conditionally sets `ExistingSchedule` to `0` without changing `LastCalculation`. If another calculation has changed the record, or KVS returns no `etag`, it leaves the record untouched. Invalid JSON or schedule IDs are logged without stopping cleanup for other instances. Delayed cleanup is skipped when the target script is already running at the check.
 
 <img src="images/KvsSystem.jpg" alt="SystemData fields in one KVS JSON record" width="750">
 
@@ -247,7 +247,7 @@ Before upgrading, check the active settings. KVS accepts whole-hour `TimePeriod`
 
 Also check the [configuration record](#configuration-using-kvs): use JSON numbers, `true` or `false` for booleans, a supported `Country`, and a non-negative integer `RelayId`. Saved mode and relay settings must be valid even in Virtual Component mode. The package names are `PARTN24PL` and `PARTN12PL`; shorter spellings in older instructions were errors.
 
-Unreleased version **5** removes automatic restoration from backups. The version is recorded for logs and diagnostics; no migration is triggered by the version number. `SmartHeatingVC<ScriptId>` is obsolete: the script never reads or writes it, and you may delete it. Existing controls keep their values.
+Unreleased version **5** removes automatic restoration from backups. A legacy empty-string schedule ID is treated as no schedule only for numeric versions from 4.2 up to, but excluding, 5. Null, missing and other invalid IDs still pause updates. This compatibility rule applies only to the existing `SmartHeatingSys<ScriptId>` record. `SmartHeatingVC<ScriptId>` is obsolete: the script never reads or writes it, and you may delete it. Existing controls keep their values.
 
 > [!WARNING]
 > Direct upgrade from version 4.1 is not supported because the KVS format changed to JSON. After installation, reconfigure all settings in KVS or Virtual Components.
@@ -289,7 +289,7 @@ flowchart TD
 - In threshold-only mode (`TimePeriod: 0`), unavailable prices pause updates. The existing schedule and relay settings remain; there is no historical-hour fallback.
 - Failed configuration or SystemData reads log **“Schedule updates are paused”** and leave heating controls, relay settings and schedules unchanged.
 - After a power cut, the script waits about 30 seconds for device time. If time is still unavailable, timed modes use the fallback above; threshold-only mode pauses updates.
-- When device time synchronizes, the script retries calculation. Failed requests are retried at five-minute intervals.
+- When device time synchronizes, the script retries calculation. Failed requests are retried at five-minute intervals, including after midnight following an evening outage. Repeated failures retain the installed fallback rather than recreating it.
 
 # Smart Heating for Thermia Villa & Eko Classic Using Shelly
 

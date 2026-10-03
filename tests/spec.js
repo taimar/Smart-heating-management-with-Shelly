@@ -684,7 +684,7 @@ function watchdogWorld() {
     return { kvs: {
         SmartHeatingSys1: JSON.stringify({ ExistingSchedule: 71, Version: 4.9, LastCalculation: "attempt" }),
         SmartHeatingSys2: JSON.stringify({ ExistingSchedule: 72, Version: 4.9 }),
-    }, schedules: [71, 72], failDel: {}, running: {}, calls: [], logs: [] };
+    }, schedules: [{ id: 71 }, { id: 72 }], failDel: {}, running: {}, calls: [], logs: [] };
 }
 function kvTag(value) {
     return require("crypto").createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -707,7 +707,7 @@ function watchdogSandbox(code, w) {
                 }
                 if (method === "Schedule.Delete") {
                     if (w.failDel && w.failDel[params.id]) return done(null, -1);
-                    const index = w.schedules.findIndex(job => (typeof job === "number" ? job : job.id) === params.id);
+                    const index = w.schedules.findIndex(job => job.id === params.id);
                     if (index === -1) return done(null, -103);
                     w.schedules.splice(index, 1); return done({});
                 }
@@ -727,7 +727,7 @@ scenario("S12 watchdog deletes only the stopped script's schedule and retains fa
         for (const failed of [false, true]) {
             const w = watchdogWorld(), sb = watchdogSandbox(code, w);
             w.failDel[71] = failed; sb.fire(1); sb.flush();
-            assert.deepEqual(w.schedules, failed ? [71, 72] : [72], name);
+            assert.deepEqual(w.schedules, failed ? [{ id: 71 }, { id: 72 }] : [{ id: 72 }], name);
             const saved = JSON.parse(w.kvs.SmartHeatingSys1);
             assert.equal(saved.ExistingSchedule, failed ? 71 : 0, name);
             assert.equal(saved.LastCalculation, "attempt", name);
@@ -1191,12 +1191,10 @@ scenario("S25 A periodic tick cannot overlap an unfinished offline fallback", ()
     for (const pending of ["Switch.SetConfig", "Schedule.Create", "KVS.set"]) {
         W = freshWorld(); W.kvs.SmartHeatingConf1 = conf(); W.http = () => [null, -114];
         t = boot(true); t.fcTm();
-        let steps = 0;
-        while (!t.pending().includes(pending) && !t.err && steps++ < 100) t.step();
-        const reached = t.pending().includes(pending);
+        runUntilPending(t, pending);
         t.loop(); const limits = t.flush();
         check("S25 tick during fallback " + pending + " settles with one persisted schedule",
-            reached && !t.err && W.schedules.length === 1 && specHours(W.schedules[0].timespec) === FALLBACK &&
+            !t.err && W.schedules.length === 1 && specHours(W.schedules[0].timespec) === FALLBACK &&
             JSON.parse(W.kvs.SmartHeatingSys1 || "{}").ExistingSchedule === W.schedules[0].id &&
             limits.rpcPeak <= 5 && limits.timerPeak <= 5, String(t.err || ""));
         const fallbackId = W.schedules[0] && W.schedules[0].id;
@@ -1704,10 +1702,7 @@ scenario("S46 Record a new schedule attempt after creation, including failed and
         W.kvs.SmartHeatingConf1 = conf(outcome === "empty" ? { HeatingTime: 0, AlwaysOnPrice: -999 } : {});
         if (outcome === "failed") W.fail["Schedule.Create"] = true;
         const runtime = boot(true); runtime.fcTm();
-        let steps = 0;
-        const pending = outcome === "empty" ? "KVS.set" : "Schedule.Create";
-        while (!runtime.pending().includes(pending) && !runtime.err && steps++ < 250) runtime.step();
-        assert.ok(runtime.pending().includes(pending));
+        runUntilPending(runtime, outcome === "empty" ? "KVS.set" : "Schedule.Create");
         assert.equal(W.kvsWrites.includes("SmartHeatingSys1"), false);
         runtime.loop(); runtime.flush(); assert.ifError(runtime.err);
         const saved = JSON.parse(W.kvs.SmartHeatingSys1);
@@ -2072,9 +2067,9 @@ scenario("S59 malformed watchdog records do not stop other cleanup", () => {
             const w = watchdogWorld(); w.kvs.SmartHeatingSys1 = value;
             const sb = watchdogSandbox(code, w);
             sb.fire(1); assert.doesNotThrow(() => sb.flush(), name + " " + value);
-            assert.deepEqual(w.schedules, [71, 72]); assert.equal(w.kvs.SmartHeatingSys1, value);
+            assert.deepEqual(w.schedules, [{ id: 71 }, { id: 72 }]); assert.equal(w.kvs.SmartHeatingSys1, value);
             assert.ok(w.logs.some(line => line.includes("1") && /invalid|JSON/i.test(line)), name + " diagnostic");
-            sb.fire(2); sb.flush(); assert.deepEqual(w.schedules, [71]);
+            sb.fire(2); sb.flush(); assert.deepEqual(w.schedules, [{ id: 71 }]);
         }
     }
 });
@@ -2083,23 +2078,27 @@ scenario("S60 watchdog cannot clear newer records or clean up a restarted script
         let w = watchdogWorld(), sb = watchdogSandbox(code, w);
         sb.fire(1); sb.step(); sb.step();
         const newer = JSON.stringify({ ExistingSchedule: 73, Version: 5, LastCalculation: "new" });
-        w.kvs.SmartHeatingSys1 = newer; w.schedules.push(73); sb.flush();
+        w.kvs.SmartHeatingSys1 = newer; w.schedules.push({ id: 73 }); sb.flush();
         assert.equal(w.kvs.SmartHeatingSys1, newer, name + " conditional clear");
-        assert.deepEqual(w.schedules, [72, 73]);
+        assert.deepEqual(w.schedules, [{ id: 72 }, { id: 73 }]);
         w = watchdogWorld(); w.noEtag = true; sb = watchdogSandbox(code, w);
         const old = w.kvs.SmartHeatingSys1; sb.fire(1); sb.flush();
         assert.equal(w.kvs.SmartHeatingSys1, old, name + " missing etag preserves record");
         w = watchdogWorld(); sb = watchdogSandbox(code, w); sb.fire(1);
         w.running[1] = true; sb.flush();
-        assert.deepEqual(w.schedules, [71, 72], name + " restarted script");
+        assert.deepEqual(w.schedules, [{ id: 71 }, { id: 72 }], name + " restarted script");
     }
 });
 
-function stopBeforeCallback(runtime, method) {
+function runUntilPending(runtime, method) {
     let steps = 0;
-    while (!runtime.pending().includes(method + ":callback") && !runtime.err && steps++ < 250) runtime.step();
+    while (!runtime.pending().includes(method) && !runtime.err && steps++ < 250) runtime.step();
     assert.ifError(runtime.err);
-    assert.ok(runtime.pending().includes(method + ":callback"), "device completed " + method);
+    assert.ok(runtime.pending().includes(method),
+        "RPC boundary not reached: " + method + " (pending: " + runtime.pending().join(", ") + ")");
+}
+function stopBeforeCallback(runtime, method) {
+    runUntilPending(runtime, method + ":callback");
     runtime.stop();
 }
 scenario("S61 interrupted creation never leaves a newly enabled unrecorded job", () => {
@@ -2220,9 +2219,7 @@ scenario("S68 pending watchdog deletion is reconciled on the next tick", () => {
         const watchdog = watchdogSandbox(watchdogCopies[1][1], W);
         watchdog.fire(1); watchdog.step();
         runtime = boot(true); runtime.fcTm();
-        let steps = 0;
-        while (!runtime.pending().includes("KVS.set") && !runtime.err && steps++ < 250) runtime.step();
-        assert.ifError(runtime.err); assert.ok(runtime.pending().includes("KVS.set"));
+        runUntilPending(runtime, "KVS.set");
         watchdog.flush(); runtime.flush();
         assert.equal(W.schedules.length, 0, "old deletion took effect after restart updated its job");
         const limits = runtime.advanceBy(300000);

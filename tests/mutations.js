@@ -12,7 +12,7 @@ const mutations = [
     ['non-array-inventory-accepted', 'S63b', 'typeof res.jobs.push !== "function" || ', ''],
     ['missing-key-assumes-persisted-id', 'S67', 'function rSys(res, err, msg) {\n    _.idSaved = false;', 'function rSys(res, err, msg) {\n    _.idSaved = s.exSc > 0;'],
     ['legacy-empty-id-rejected', 'S57', 'saved.ExistingSchedule = 0;', 'saved.ExistingSchedule = "";'],
-    ['fallback-price-timestamp-retained', 'S58', 'function hErr(msg) {\n    _.tsPr = 0;', 'function hErr(msg) {'],
+    ['fallback-price-timestamp-retained', 'S58', 'function hErr(msg) {\n    invalidateFetches();', 'function hErr(msg) {\n    if (c.isFc) { _.tsFc = 0; }'],
     ['kvs-four-hour-period-rejected', 'S18', 'period > 24', 'period > 24 || period === 4'],
     ['one-hour-forecast-skips-midnight', 'S18c',
         'Math.floor(((new Date().getHours() + 1) % 24) / c.tPer) + 1',

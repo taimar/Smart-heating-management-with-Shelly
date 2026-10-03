@@ -979,8 +979,7 @@ function fScd(eler) {
         Shelly.call("Schedule.Create", schedule, function (res, err, msg) {
             if (err !== 0 || !res || !idOk(res.id) || res.id === 0) {
                 print(_.pId, "Scheduler not created or its ID could not be verified:", err, msg);
-                _.tsPr = 0;
-                if (c.isFc) { _.tsFc = 0; }
+                invalidateFetches();
                 _.manu = false;
                 fKvs(0, false);
                 return;
@@ -1070,10 +1069,14 @@ function srAr(arr, sort) {
     return arr;
 }
 
-// Handle errors by logging and setting manual mode.
-function hErr(msg) {
+function invalidateFetches() {
     _.tsPr = 0;
     if (c.isFc) { _.tsFc = 0; }
+}
+
+// Handle errors by logging and setting manual mode.
+function hErr(msg) {
+    invalidateFetches();
     if (c.tPer === 0) {
         rErr("Threshold-only mode needs current prices; no historical-hour fallback is defined. Relay settings and any existing schedule are left unchanged. " + msg);
         return;
@@ -1086,8 +1089,7 @@ function rErr(msg) {
     print(_.pId, "Schedule updates are paused.", msg);
     print(_.pId, s.exSc > 0 ? "Keeping recorded schedule ID " + s.exSc + "." : "No heating schedule is recorded.",
         "Retrying in " + _.freq / 60 + " min.");
-    _.tsPr = 0;
-    if (c.isFc) { _.tsFc = 0; }
+    invalidateFetches();
     _.manu = false;
     _.isLp = false;
 }
@@ -1134,8 +1136,7 @@ function loop() {
             if (res.jobs[i].id === s.exSc) { found = true; break; }
         }
         if (!found) {
-            _.tsPr = 0;
-            if (c.isFc) { _.tsFc = 0; }
+            invalidateFetches();
             _.manu = false;
         }
         calc();

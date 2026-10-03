@@ -865,17 +865,19 @@ function fFee(epoch, p) {
     }
 }
 
+function scOk(res) {
+    if (!res || !res.jobs || typeof res.jobs.push !== "function" || !idOk(res.jobs.length)) { return false; }
+    for (let i = 0; i < res.jobs.length; i++) {
+        if (!res.jobs[i] || !idOk(res.jobs[i].id) || res.jobs[i].id === 0) { return false; }
+    }
+    return true;
+}
 // Check the old schedule's actual relay command before changing its timer.
 function fTmr(eler) {
     if (!(s.exSc > 0)) { if (eler.length) { sTmr(eler); } else { fScd(eler); } return; }
     Shelly.call("Schedule.List", null, function (res, err, msg, data) {
-        if (err !== 0 || !res || !res.jobs || typeof res.jobs.push !== "function" || !idOk(res.jobs.length)) {
+        if (err !== 0 || !scOk(res)) {
             rErr("Cannot check the existing schedule before updating its timer: " + msg); return;
-        }
-        for (let i = 0; i < res.jobs.length; i++) {
-            if (!res.jobs[i] || !idOk(res.jobs[i].id) || res.jobs[i].id === 0) {
-                rErr("Cannot check the existing schedule: invalid schedule inventory."); return;
-            }
         }
         for (let i = 0; i < res.jobs.length; i++) {
             const job = res.jobs[i];
@@ -1114,6 +1116,25 @@ function loop() {
     }
     _.isLp = true;
     if (_.sysPending) { pSys(); return; }
+    if (!(s.exSc > 0)) { calc(); return; }
+    // A watchdog delete dispatched before restart can land after an in-place update.
+    Shelly.call("Schedule.List", null, function (res, err, msg) {
+        if (err !== 0 || !scOk(res)) {
+            rErr("Cannot verify the recorded schedule: " + msg); return;
+        }
+        let found = false;
+        for (let i = 0; i < res.jobs.length; i++) {
+            if (res.jobs[i].id === s.exSc) { found = true; break; }
+        }
+        if (!found) {
+            _.tsPr = 0;
+            if (c.isFc) { _.tsFc = 0; }
+            _.manu = false;
+        }
+        calc();
+    });
+}
+function calc() {
     if (updt(_.tsPr) || c.isFc && updt(_.tsFc)) {   //check if the prices or forecast needs to be updated
         strt();                                     //start the program
     } else {

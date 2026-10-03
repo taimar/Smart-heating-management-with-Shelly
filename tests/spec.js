@@ -2211,6 +2211,34 @@ scenario("S67 a remembered ID is persisted again before reactivation after key d
     assert.equal(W.schedules[0].enable, true);
 });
 
+scenario("S68 pending watchdog deletion is reconciled on the next tick", () => {
+    for (const offline of [false, true]) {
+        W = freshWorld(); W.kvs.SmartHeatingConf1 = conf();
+        W.http = offline ? () => [null, -114] : priceServer(PRICE);
+        let runtime = boot(); runtime.fcTm(); runtime.stop();
+        const oldId = W.schedules[0].id;
+        const watchdog = watchdogSandbox(watchdogCopies[1][1], W);
+        watchdog.fire(1); watchdog.step();
+        runtime = boot(true); runtime.fcTm();
+        let steps = 0;
+        while (!runtime.pending().includes("KVS.set") && !runtime.err && steps++ < 250) runtime.step();
+        assert.ifError(runtime.err); assert.ok(runtime.pending().includes("KVS.set"));
+        watchdog.flush(); runtime.flush();
+        assert.equal(W.schedules.length, 0, "old deletion took effect after restart updated its job");
+        const limits = runtime.advanceBy(300000);
+        expectSchedule(runtime, offline ? FALLBACK : cheapest(EVE.normal, 24, 10, PRICE));
+        assert.notEqual(W.schedules[0].id, oldId, "confirmed absence permits a replacement");
+        assert.equal(JSON.parse(W.kvs.SmartHeatingSys1).ExistingSchedule, W.schedules[0].id);
+        assert.ok(limits.rpcPeak <= 5 && limits.timerPeak <= 5);
+        const before = JSON.stringify([W.kvs, W.schedules, W.relayConfig]);
+        W.listResponse = { jobs: { length: 0 } };
+        runtime.advanceBy(300000);
+        assert.ifError(runtime.err);
+        assert.equal(JSON.stringify([W.kvs, W.schedules, W.relayConfig]), before,
+            "malformed periodic inventory cannot authorize replacement");
+    }
+});
+
 const options = process.argv.slice(3);
 const filter = options.find(arg => arg.startsWith("--filter="))?.slice("--filter=".length);
 const selected = scenarios.filter(({ name }) => !filter || name.startsWith(filter));

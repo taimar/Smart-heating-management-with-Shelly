@@ -6,7 +6,7 @@ Branch `claude/actionable-bugs-8a5c69`, reviewed 2026-10-01 at high effort and r
 
 Stage 1 addresses #1, #2 and #4: JSON-era empty IDs (4.2 <= Version < 5), retries across midnight, validated watchdog records and conditional cleanup writes. Regression scenarios S57–S60 pass under Node 24. Watchdog behavior is checked on readable/minified copies, with parity against installed code. Shelly hardware qualification remains outstanding.
 
-Stage 2 addresses #3 with in-place updates and disabled-create → persist-ID → enable ordering. Zero-hour calculations retain a disabled schedule. S61–S67 exercise interruptions, restart, invalid responses, activation failure, two instances, and stale watchdog writes. Disabled orphans and stale/reassigned IDs remain documented boundaries. No Shelly memory or hardware measurements are available.
+Stage 2 addresses #3 with in-place updates and disabled-create → persist-ID → enable ordering. Zero-hour calculations retain a disabled schedule. S61–S68 exercise interruptions, restart, invalid responses, activation failure, two instances, stale watchdog writes, and already-dispatched watchdog deletion after restart. The latter is reconciled on the next five-minute tick even while prices remain fresh or fallback is active. Disabled orphans and stale/reassigned IDs remain documented boundaries. No Shelly memory or hardware measurements are available.
 
 ## Priority
 

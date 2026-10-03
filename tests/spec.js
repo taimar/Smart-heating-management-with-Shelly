@@ -2230,12 +2230,110 @@ scenario("S68 pending watchdog deletion is reconciled on the next tick", () => {
         assert.notEqual(W.schedules[0].id, oldId, "confirmed absence permits a replacement");
         assert.equal(JSON.parse(W.kvs.SmartHeatingSys1).ExistingSchedule, W.schedules[0].id);
         assert.ok(limits.rpcPeak <= 5 && limits.timerPeak <= 5);
+        const lists = W.calls.filter(c => c.method === "Schedule.List").length;
+        runtime.advanceBy(600000);
+        assert.equal(W.calls.filter(c => c.method === "Schedule.List").length, lists,
+            "replacement ID ends startup verification");
+    }
+});
+
+scenario("S69 failed startup checks preserve fresh data and retry until verified", () => {
+    for (const malformed of [false, true]) {
+        FIXED_MS = RealDate.parse("2026-01-14T12:00:00+02:00"); W = freshWorld(); existingHeating();
+        W.kvs.SmartHeatingConf1 = conf({ IsForecastUsed: true });
+        W.http = p => p.url.includes("open-meteo")
+            ? [{ code: 200, body: '{"apparent_temperature":[10,10]}' }, 0] : priceServer(PRICE)(p);
+        const runtime = boot(true); runtime.advanceBy(1500);
         const before = JSON.stringify([W.kvs, W.schedules, W.relayConfig]);
-        W.listResponse = { jobs: { length: 0 } };
-        runtime.advanceBy(300000);
+        const requests = W.calls.filter(c => c.method === "HTTP.GET").length;
+        const lists = W.calls.filter(c => c.method === "Schedule.List").length;
+        if (malformed) W.listResponse = { jobs: { length: 0 } };
+        else W.fail["Schedule.List"] = true;
+        runtime.advanceBy(900000);
         assert.ifError(runtime.err);
-        assert.equal(JSON.stringify([W.kvs, W.schedules, W.relayConfig]), before,
-            "malformed periodic inventory cannot authorize replacement");
+        assert.equal(W.calls.filter(c => c.method === "Schedule.List").length, lists + 3);
+        assert.equal(W.calls.filter(c => c.method === "HTTP.GET").length, requests,
+            "daytime verification failures do not invalidate either fetch timestamp");
+        assert.equal(JSON.stringify([W.kvs, W.schedules, W.relayConfig]), before);
+        delete W.listResponse; delete W.fail["Schedule.List"];
+        runtime.advanceBy(300000);
+        assert.equal(W.calls.filter(c => c.method === "Schedule.List").length, lists + 4);
+        runtime.advanceBy(600000);
+        assert.equal(W.calls.filter(c => c.method === "Schedule.List").length, lists + 4,
+            "successful verification ends the window");
+        assert.equal(W.calls.filter(c => c.method === "HTTP.GET").length, requests);
+    }
+});
+scenario("S69 failed startup checks preserve fallback suppression", () => {
+    FIXED_MS = RealDate.parse("2026-01-14T12:00:00+02:00"); W = freshWorld(); existingHeating();
+    W.kvs.SmartHeatingConf1 = conf(); W.http = () => [null, -114];
+    const runtime = boot(true); runtime.advanceBy(1500);
+    const before = JSON.stringify([W.kvs, W.schedules, W.relayConfig]);
+    const start = W.calls.length;
+    W.fail["Schedule.List"] = true; runtime.advanceBy(600000);
+    delete W.fail["Schedule.List"]; runtime.advanceBy(600000);
+    assert.ifError(runtime.err);
+    const calls = W.calls.slice(start);
+    assert.equal(calls.filter(c => c.method === "HTTP.GET").length, 4, "normal outage retries continue");
+    assert.equal(calls.filter(c => c.method === "Schedule.List").length, 3, "window ends on successful verification");
+    assert.equal(JSON.stringify([W.kvs, W.schedules, W.relayConfig]), before, "fallback is not reinstalled");
+    assert.ok(!calls.some(c => ["KVS.set", "Schedule.Update", "Schedule.Create", "Switch.SetConfig"].includes(c.method)));
+});
+scenario("S70 failed startup verification does not suppress the daily refresh", () => {
+    FIXED_MS = RealDate.parse("2026-01-14T22:50:00+02:00"); W = freshWorld(); existingHeating();
+    W.kvs.SmartHeatingConf1 = conf(); W.http = priceServer(PRICE);
+    const runtime = boot(true); runtime.advanceBy(1500);
+    const before = JSON.stringify([W.kvs, W.schedules, W.relayConfig]);
+    const requests = W.calls.filter(c => c.method === "HTTP.GET").length;
+    W.fail["Schedule.List"] = true; W.http = priceServer(PRICE2);
+    runtime.advanceBy(300000);
+    assert.equal(W.calls.filter(c => c.method === "HTTP.GET").length, requests, "no early refresh at 22:55");
+    runtime.advanceBy(300000);
+    assert.ifError(runtime.err);
+    assert.equal(W.calls.filter(c => c.method === "HTTP.GET").length, requests + 1, "refresh proceeds at 23:00");
+    assert.equal(JSON.stringify([W.kvs, W.schedules, W.relayConfig]), before,
+        "the calculation's own failed inventory check preserves heating");
+    delete W.fail["Schedule.List"]; runtime.advanceBy(300000);
+    expectSchedule(runtime, cheapest(EVE.normal, 24, 10, PRICE2));
+});
+scenario("S71 startup verification protects only a reused recorded ID", () => {
+    for (const state of ["zero", "missing key", "replaced", "disabled"]) {
+        FIXED_MS = RealDate.parse("2026-01-14T12:00:00+02:00"); W = freshWorld();
+        W.kvs.SmartHeatingConf1 = conf(state === "disabled" ? { HeatingTime: 0 } : {});
+        W.http = priceServer(PRICE);
+        if (state === "zero") W.kvs.SmartHeatingSys1 = JSON.stringify({ ExistingSchedule: 0, Version: 5 });
+        if (state === "replaced" || state === "disabled") { existingHeating(); if (state === "replaced") W.schedules = []; }
+        const runtime = boot(true); runtime.advanceBy(1500);
+        const lists = W.calls.filter(c => c.method === "Schedule.List").length;
+        runtime.advanceBy(900000);
+        assert.ifError(runtime.err);
+        assert.equal(W.calls.filter(c => c.method === "Schedule.List").length,
+            lists + (state === "disabled" ? 1 : 0), state);
+        if (state === "disabled") {
+            assert.equal(W.schedules[0].enable, false); assert.equal(W.schedules[0].id, 41);
+        }
+    }
+});
+scenario("S72 startup verification waits for valid identity and completed persistence", () => {
+    for (const fault of ["read", "save", "update"]) {
+        FIXED_MS = RealDate.parse("2026-01-14T12:00:00+02:00"); W = freshWorld(); existingHeating();
+        W.kvs.SmartHeatingConf1 = conf(); W.http = priceServer(PRICE);
+        if (fault === "read") W.fail["KVS.Get"] = p => p.key === "SmartHeatingSys1";
+        if (fault === "save") W.fail["KVS.set"] = p => p.key === "SmartHeatingSys1";
+        if (fault === "update") W.fail["Schedule.Update"] = true;
+        const runtime = boot(); runtime.fcTm();
+        const lists = W.calls.filter(c => c.method === "Schedule.List").length;
+        if (fault === "save") {
+            runtime.loop();
+            assert.equal(W.calls.filter(c => c.method === "Schedule.List").length, lists, "pending save comes first");
+        }
+        W.fail = {}; runtime.loop();
+        const completed = W.calls.filter(c => c.method === "Schedule.List").length;
+        assert.equal(completed, lists + (fault === "save" ? 0 : 1), "no check before initial reconciliation");
+        runtime.loop(); runtime.loop();
+        assert.ifError(runtime.err);
+        assert.equal(W.calls.filter(c => c.method === "Schedule.List").length, completed + 1,
+            "a failed first read or calculation did not close the window");
     }
 });
 

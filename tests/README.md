@@ -77,4 +77,6 @@ No hardware results are available for these changes. For each run, record the de
 - Record schedule ID allocation after deletion and reboot; if IDs are reused, retain the documented manual stale-ID reconciliation boundary.
 - Measure `mem_used` and `mem_peak` at the pre-change baseline, after lifecycle changes, and after pricing cleanup. Include two supported instances, failures and retries. Do not infer memory savings from Node results.
 
-New tests S61–S68 cover these recovery boundaries in the queued Node harness; they do not establish device qualification.
+New tests S61–S72 cover these recovery boundaries in the queued Node harness; they do not establish device qualification.
+
+Startup verification scenarios distinguish fresh daytime data from due daily calculations and offline retries. They cover repeated failed/malformed checks, successful window closure, zero or replaced startup IDs, retained disabled jobs, initial read/calculation failures and pending persistence.

@@ -116,6 +116,8 @@ let _ = {
     sysPending: false, //schedule record still needs to be saved
     actPending: false, //activation waits for successful persistence
     idSaved: false,    //current schedule identity is present in KVS
+    bootId: null,      //first verified identity; zero closes startup verification
+    bootReady: false,  //initial schedule calculation has finished persistence and activation
     manu: false,    //manual heating flag
     prov: "None",   //network provider name
     newV: 5,      //new script version
@@ -369,7 +371,7 @@ function rConf(res, err, msg) {
 function rSys(res, err, msg) {
     _.idSaved = false;
     // A deleted key does not erase the schedule ID already known this boot.
-    if (err === -105) { _.sdOk = true; return; }
+    if (err === -105) { if (_.bootId === null) { _.bootId = 0; } _.sdOk = true; return; }
     if (err !== 0 || !res) { print(_.pId, "SystemData read failed:", err, msg); return; }
     try {
         const saved = JSON.parse(res.value);
@@ -381,6 +383,7 @@ function rSys(res, err, msg) {
             print(_.pId, "Invalid SystemData: ExistingSchedule must be a non-negative integer."); return;
         }
         s.exSc = saved.ExistingSchedule;
+        if (_.bootId === null) { _.bootId = s.exSc; }
         _.idSaved = s.exSc > 0;
         _.sdOk = true;
     } catch (e) { print(_.pId, "SystemData is not valid JSON; restore the record with the correct schedule ID."); }
@@ -1007,13 +1010,14 @@ function pSys() {
             print(_.pId, "Script v", _.newV, (s.exSc > 0 ? " saved schedule ID:" + s.exSc : " saved no heating schedule") +
                 ", next heating calculation at", nxHr(1) + (_.updD < 10 ? ":0" : ":") + _.updD);
             if (_.actPending) { aSc(); }
-            else { f_Wd(); }
+            else { _.bootReady = true; f_Wd(); }
         });
 }
 function aSc() {
     Shelly.call("Schedule.Update", { id: s.exSc, enable: true }, function (res, err, msg) {
         _.actPending = false;
         if (err !== 0) { rErr("Recorded schedule could not be activated: " + msg); return; }
+        _.bootReady = true;
         print(_.pId, "Recorded schedule activated:", s.exSc);
         f_Wd();
     });
@@ -1116,17 +1120,21 @@ function loop() {
     }
     _.isLp = true;
     if (_.sysPending) { pSys(); return; }
-    if (!(s.exSc > 0)) { calc(); return; }
+    if (!_.bootReady || !(_.bootId > 0)) { calc(); return; }
+    if (s.exSc !== _.bootId) { _.bootId = 0; calc(); return; }
     // A watchdog delete dispatched before restart can land after an in-place update.
     Shelly.call("Schedule.List", null, function (res, err, msg) {
         if (err !== 0 || !scOk(res)) {
-            rErr("Cannot verify the recorded schedule: " + msg); return;
+            print(_.pId, "Cannot verify startup schedule; retrying the check in", _.freq / 60, "min:", msg);
+            calc(); return;
         }
         let found = false;
         for (let i = 0; i < res.jobs.length; i++) {
             if (res.jobs[i].id === s.exSc) { found = true; break; }
         }
-        if (!found) {
+        if (found) { _.bootId = 0; }
+        else {
+            _.bootReady = false;
             _.tsPr = 0;
             if (c.isFc) { _.tsFc = 0; }
             _.manu = false;

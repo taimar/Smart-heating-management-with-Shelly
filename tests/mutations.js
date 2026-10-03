@@ -8,6 +8,10 @@ const sourcePath = path.resolve(process.argv[2] || path.join(__dirname, '..', 'S
 const source = fs.readFileSync(sourcePath, 'utf8');
 const suite = path.join(__dirname, 'spec.js');
 const mutations = [
+    ['startup-check-invalidates-fresh-prices', 'S69', 'calc(); return;\n        }\n        let found', '_.tsPr = 0; calc(); return;\n        }\n        let found'],
+    ['skip-periodic-schedule-reconciliation', 'S68', 'if (!_.bootReady || !(_.bootId > 0)) { calc(); return; }', 'if (true) { calc(); return; }'],
+    ['non-array-inventory-accepted', 'S63b', 'typeof res.jobs.push !== "function" || ', ''],
+    ['missing-key-assumes-persisted-id', 'S67', 'function rSys(res, err, msg) {\n    _.idSaved = false;', 'function rSys(res, err, msg) {\n    _.idSaved = s.exSc > 0;'],
     ['legacy-empty-id-rejected', 'S57', 'saved.ExistingSchedule = 0;', 'saved.ExistingSchedule = "";'],
     ['fallback-price-timestamp-retained', 'S58', 'function hErr(msg) {\n    _.tsPr = 0;', 'function hErr(msg) {'],
     ['kvs-four-hour-period-rejected', 'S18', 'period > 24', 'period > 24 || period === 4'],
@@ -31,7 +35,7 @@ const mutations = [
         'if (err !== 0 || !res) { print(_.pId, "SystemData read failed:", err, msg); return; }',
         'if (err !== 0 || !res) { s.exSc = 0; print(_.pId, "SystemData read failed:", err, msg); return; }'],
     ['cron-minute', 'S48', 'timespec: "0 0 " + hrs', 'timespec: "0 30 " + hrs'],
-    ['disabled-schedule', 'S48', 'enable: true,\n        timespec:', 'enable: false,\n        timespec:'],
+    ['disabled-schedule', 'S48', 'function aSc() {\n    Shelly.call("Schedule.Update", { id: s.exSc, enable: true }', 'function aSc() {\n    Shelly.call("Schedule.Update", { id: s.exSc, enable: false }'],
     ['wrong-relay', 'S48', '                id: c.rId,', '                id: 0,'],
     ['wrong-polarity', 'S48', '                on: !c.Inv', '                on: c.Inv'],
     ['forecast-coefficient', 'S49', 'pFac: 0.5,', 'pFac: 0.6,'],
@@ -82,7 +86,7 @@ for (const [pack, rates] of [
     '{ dRt: 0, nRt: 0, dMRt: 0, hMRt: 0 }']);
 
 function run(file) {
-    return spawnSync(process.execPath, [suite, file], {
+    return spawnSync(process.execPath, [...process.execArgv, suite, file], {
         env: { ...process.env, TZ: 'Europe/Tallinn' }, encoding: 'utf8', timeout: 20000,
         maxBuffer: 4 * 1024 * 1024,
     });
@@ -132,7 +136,8 @@ try {
             }
             if (status !== 'KILLED') unresolved++;
             console.log(status + ' ' + name + ' intended=' + intended + ' detected=' + (detectors.join(',') || 'none'));
-            if (status === 'ERROR') console.log(result.error?.message || result.stderr || result.stdout.slice(-1000));
+            if (status === 'ERROR') console.log(JSON.stringify({ status: result.status, signal: result.signal, bytes: result.stdout.length }),
+                result.error?.message || result.stderr || result.stdout.slice(-1000));
         } catch (error) {
             unresolved++;
             console.log((error instanceof StalePatternError ? 'STALE' : 'ERROR') + ' ' + name +

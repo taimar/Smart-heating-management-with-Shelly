@@ -69,17 +69,17 @@ The script uses one schedule containing all selected heating hours.
 | --- | --- |
 | <img src="images/oneschedule.jpg" alt="Open the schedule" width="200"> | <img src="images/editschedule.jpg" alt="Edit heating hours" width="200"> |
 
-To add or remove hours manually, click them and select **Next → Next → Save**. Your edits remain until the script replaces the schedule after its next calculation.
+To add or remove hours manually, click them and select **Next → Next → Save**. Your edits remain until the script updates the schedule after its next calculation.
 
 In the device web interface, **Advanced → KVS** contains one JSON record named `SmartHeatingSys<ScriptId>`, for example `SmartHeatingSys1` for script ID 1:
 
 | Field | Meaning |
 | --- | --- |
-| `ExistingSchedule` | The recorded ID of this script's schedule; `0` means no schedule is recorded. |
+| `ExistingSchedule` | The recorded ID of this script's active or disabled schedule; `0` means no schedule is recorded. |
 | `LastCalculation` | The timestamp of the latest recorded scheduling result. |
 | `Version` | The heating script version that saved the record. |
 
-`LastCalculation` records the time of a price-based schedule, an offline fallback, no heating hours, or a failed schedule creation. The timestamp stays the same through save retries, so it records the result time rather than the eventual save time. It does not prove that prices were retrieved successfully or that heating occurred.
+`LastCalculation` records the time of a price-based schedule, an offline fallback, no heating hours, or a failed schedule creation. The timestamp stays the same through save retries, so it records the result time rather than the eventual save time. It does not prove that prices were retrieved successfully, that the schedule was activated, or that heating occurred.
 
 After successfully deleting the heating schedule, the watchdog conditionally sets `ExistingSchedule` to `0` without changing `LastCalculation`. If another calculation has changed the record, or KVS returns no `etag`, it leaves the record untouched. Invalid JSON or schedule IDs are logged without stopping cleanup for other instances. Delayed cleanup is skipped when the target script is already running at the check.
 
@@ -218,7 +218,11 @@ If an interrupted installation leaves some controls missing, retries and restart
 
 **“Group setup incomplete”** means grouping needs manual attention; heating can proceed. Existing groups retain their names and membership. Create the group or add controls manually if needed, including when a restart left the group absent or empty. Once all controls exist, later calculations and restarts do not retry grouping.
 
-A failed SystemData write retries the same record before another calculation. A restart or power cut before the write succeeds can leave an unrecorded schedule. The script uses the recorded ID to manage its schedule; it does not discover or recover orphan schedules. After a failed polarity transition, the previous schedule may remain disabled until a successful retry.
+The script updates its recorded schedule in place. When no heating hours are selected, it disables that schedule and retains its ID for later use; an initial zero-hour calculation creates no schedule. A new schedule is created disabled and enabled only after its ID is saved. A failed SystemData write retries the same record before another calculation. Activation failures retain the ID and retry after five minutes. After startup calculation and persistence finish, the next five-minute tick verifies a reused startup ID. Failed or malformed verification reads keep this check pending without invalidating prices or fallback state; normally due calculations and outage retries still run, with their own inventory checks. A valid check confirming the job exists, including a disabled job, closes the window. Confirmed absence triggers recovery; a zero startup ID or replacement ID needs no further startup check. This is a bounded startup check, not ongoing recovery from manual deletion or a guarantee against arbitrarily delayed cleanup. After a failed polarity transition, the previous schedule may remain disabled until a successful retry.
+
+A restart or power cut before the new ID is saved can leave an unrecorded **disabled** schedule consuming a schedule slot. Inspect actual schedules and SystemData before manually removing such jobs. Existing unrecorded enabled schedules are not repaired automatically. The script never discovers or adopts jobs by matching their hours or relay commands.
+
+The recorded ID is authoritative; it does not prove ownership if an ID has been reassigned. Reconcile a stale ID against actual device schedules manually before restarting. Upgrade all heating instances sharing the watchdog together: an older instance can reinstall the older watchdog code.
 
 # How to Install this Script
 
@@ -285,7 +289,7 @@ flowchart TD
 
 ## Tested Failure Scenarios
 
-- When prices or a required forecast are unavailable in a timed mode, the script selects fallback hours within each period using the historical price ranking and `HeatingTime`. Selection is limited to the hours available in that period. With `HeatingTime: 0`, this removes the heating schedule.
+- When prices or a required forecast are unavailable in a timed mode, the script selects fallback hours within each period using the historical price ranking and `HeatingTime`. Selection is limited to the hours available in that period. With `HeatingTime: 0`, this disables the retained heating schedule; if none exists, none is created.
 - In threshold-only mode (`TimePeriod: 0`), unavailable prices pause updates. The existing schedule and relay settings remain; there is no historical-hour fallback.
 - Failed configuration or SystemData reads log **“Schedule updates are paused”** and leave heating controls, relay settings and schedules unchanged.
 - After a power cut, the script waits about 30 seconds for device time. If time is still unavailable, timed modes use the fallback above; threshold-only mode pauses updates.

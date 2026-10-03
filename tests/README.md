@@ -1,6 +1,6 @@
 # Requirement tests for SmartHeatingWithShelly.js
 
-Run from the repository root with Node 24 and `TZ=Europe/Tallinn`; the date and DST fixtures require that timezone. No dependency installation is needed.
+Run from the repository root with Node 26 and `TZ=Europe/Tallinn`; the date and DST fixtures require that timezone. The major version is pinned in [`.nvmrc`](../.nvmrc), which CI also reads. With nvm, run `nvm install` and `nvm use` from the repository root. No test dependency installation is needed.
 
 ```bash
 TZ=Europe/Tallinn node tests/spec.js SmartHeatingWithShelly.js
@@ -44,7 +44,7 @@ node tests/mutations.js
 node tests/mutations.js /path/to/SmartHeatingWithShelly.js
 ```
 
-The runner first requires a passing baseline, then mutates temporary copies of the production script and runs the suite in `Europe/Tallinn`. It checks exact replacement-match counts, imposes a 20-second timeout per run, and removes its temporary directory. The working production script is never edited. Node CLI flags are forwarded to child runs. If Node 24 on macOS arm64 exits with `SIGSEGV`, `node --no-opt tests/mutations.js` can run the same checks without V8 optimization; a crash is an error, never a successful mutation check.
+The runner first requires a passing baseline, then mutates temporary copies of the production script and runs the suite in `Europe/Tallinn`. It checks exact replacement-match counts, imposes a 20-second timeout per run, and removes its temporary directory. The working production script is never edited. Node CLI flags are forwarded to child runs. Standard checks use Node 26 with default V8 optimization. A runtime crash is an error, never a successful mutation check.
 
 | Outcome | Meaning |
 | --- | --- |

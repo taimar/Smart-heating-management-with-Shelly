@@ -17,11 +17,13 @@ Elektrilevi https://elektrilevi.ee/en/vorguleping/vorgupaketid/eramu
 Imatra https://imatraelekter.ee/vorguteenus/vorguteenuse-hinnakirjad/
 Latvia https://sadalestikls.lv/en/tarifi
 */
+const PACK_KEYS = ["NONE", "VORK1", "VORK2", "VORK4", "VORK5", "PARTN24", "PARTN24PL", "PARTN12", "PARTN12PL", "PAMATA1", "SPECIAL1"];
 function pack(key, checkOnly) {
     if (checkOnly) {
-        return key === "VORK1" || key === "VORK2" || key === "VORK4" || key === "VORK5" ||
-            key === "PARTN24" || key === "PARTN24PL" || key === "PARTN12" || key === "PARTN12PL" ||
-            key === "PAMATA1" || key === "SPECIAL1" || key === "NONE";
+        for (let i = 0; i < PACK_KEYS.length; i++) {
+            if (key === PACK_KEYS[i]) { return true; }
+        }
+        return false;
     }
     let rate = null;
     if (key === "VORK1") { rate = { dRt: 77.2, nRt: 77.2, dMRt: 77.2, hMRt: 77.2 }; }
@@ -154,7 +156,7 @@ function dtVc() {
         {
             type: "enum", id: 201, config: {
                 name: "Network Package",
-                options: ["NONE", "VORK1", "VORK2", "VORK4", "VORK5", "PARTN24", "PARTN24PL", "PARTN12", "PARTN12PL", "PAMATA1", "SPECIAL1"],
+                options: PACK_KEYS,
                 default_value: "VORK2",
                 persisted: true,
                 meta: { ui: { view: "dropdown", webIcon: 22, titles: { "NONE": "No package", "VORK1": "Võrk1 Base", "VORK2": "Võrk2 DayNight", "VORK4": "Võrk4 DayNight", "VORK5": "Võrk5 DayNightPeak", "PARTN24": "Partner24 Base", "PARTN24PL": "Partner24Plus Base", "PARTN12": "Partner12 DayNight", "PARTN12PL": "Partner12Plus DayNight", "PAMATA1": "Pamata-1", "SPECIAL1": "Speciālais 1" } } }
@@ -598,6 +600,8 @@ function main() {
         _.prov = "Imatra";
     } else if (c.pack.substring(0, 4) == "PAMA" || c.pack.substring(0, 7) == "SPECIAL") {
         _.prov = "Lv";
+    } else {
+        _.prov = "None";
     }
     print(_.pId, "Network provider: ", _.prov, c.pack);
 
@@ -729,7 +733,10 @@ function gEle() {
             if (!pRow(body, pos, rowEnd, row) || row[0] !== epSt + qCnt * 900) { valid = false; break; }
             const hr = new Date(row[0] * 1000).getHours();
             if (hr !== hour) {
-                if (count > 0) { raw.push([first, Math.round(sum / count * 100) / 100 + fFee(first, p)]); }
+                if (count > 0) {
+                    const market = Math.round(sum / count * 100) / 100;
+                    raw.push([first, market + fFee(first, p), market]);
+                }
                 hour = hr; first = row[0]; sum = 0; count = 0;
             }
             // Cron fires only at the first occurrence of a repeated local hour.
@@ -743,7 +750,10 @@ function gEle() {
             hErr("Elering response is incomplete or malformed; retrying in " + _.freq / 60 + " min.");
             return;
         }
-        if (count > 0) { raw.push([first, Math.round(sum / count * 100) / 100 + fFee(first, p)]); }
+        if (count > 0) {
+            const market = Math.round(sum / count * 100) / 100;
+            raw.push([first, market + fFee(first, p), market]);
+        }
         //store the timestamp into memory
         _.tsPr = Math.floor(Date.now() / 1000.0);
         print(_.pId, "We got market prices from Elering ", new Date().toString());
@@ -753,8 +763,7 @@ function gEle() {
             for (let a = 0; a < raw.length; a++) {
                 let ts = raw[a][0];
                 let pric = raw[a][1];
-                let fee = fFee(ts, p);
-                let mPric = Math.round((pric - fee) * 100) / 100;
+                let mPric = raw[a][2];
                 let forceOn = mPric <= c.lowR;
                 let forceOff = mPric >= c.higR;
                 if (forceOn && !forceOff) {
@@ -785,8 +794,7 @@ function gEle() {
                 for (let a = 0; a < oneP.length; a++) {
                     let ts = oneP[a][0];
                     let pric = oneP[a][1];
-                    let fee = fFee(ts, p);
-                    let mPric = Math.round((pric - fee) * 100) / 100;
+                    let mPric = oneP[a][2];
                     let forceOn = mPric <= c.lowR;
                     let forceOff = mPric >= c.higR;
                     if (!forceOff && (a < hHrs || forceOn)) {
@@ -919,9 +927,8 @@ function sTmr(eler) {
     }, function (res, err, msg, data) {
         if (err !== 0) {
             const config = Shelly.getComponentConfig("switch", c.rId);
-            const delay = c.tmr * 60 + 10;
             if (!config || config.auto_on !== c.Inv || config.auto_off !== !c.Inv ||
-                (c.Inv ? config.auto_on_delay : config.auto_off_delay) !== delay) {
+                (c.Inv ? config.auto_on_delay : config.auto_off_delay) !== timr) {
                 rErr("Relay timer update failed and a matching timer could not be verified: " + msg);
                 return;
             }
@@ -975,8 +982,7 @@ function fScd(eler) {
         Shelly.call("Schedule.Create", schedule, function (res, err, msg) {
             if (err !== 0 || !res || !idOk(res.id) || res.id === 0) {
                 print(_.pId, "Scheduler not created or its ID could not be verified:", err, msg);
-                _.tsPr = 0;
-                if (c.isFc) { _.tsFc = 0; }
+                invalidateFetches();
                 _.manu = false;
                 fKvs(0, false);
                 return;
@@ -1067,10 +1073,14 @@ function srAr(arr, sort) {
     return arr;
 }
 
-// Handle errors by logging and setting manual mode.
-function hErr(msg) {
+function invalidateFetches() {
     _.tsPr = 0;
     if (c.isFc) { _.tsFc = 0; }
+}
+
+// Handle errors by logging and setting manual mode.
+function hErr(msg) {
+    invalidateFetches();
     if (c.tPer === 0) {
         rErr("Threshold-only mode needs current prices; no historical-hour fallback is defined. Relay settings and any existing schedule are left unchanged. " + msg);
         return;
@@ -1083,8 +1093,7 @@ function rErr(msg) {
     print(_.pId, "Schedule updates are paused.", msg);
     print(_.pId, s.exSc > 0 ? "Keeping recorded schedule ID " + s.exSc + "." : "No heating schedule is recorded.",
         "Retrying in " + _.freq / 60 + " min.");
-    _.tsPr = 0;
-    if (c.isFc) { _.tsFc = 0; }
+    invalidateFetches();
     _.manu = false;
     _.isLp = false;
 }
@@ -1135,8 +1144,7 @@ function loop() {
         if (found) { _.bootId = 0; }
         else {
             _.bootReady = false;
-            _.tsPr = 0;
-            if (c.isFc) { _.tsFc = 0; }
+            invalidateFetches();
             _.manu = false;
         }
         calc();

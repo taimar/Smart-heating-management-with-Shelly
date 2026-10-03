@@ -169,7 +169,7 @@ Elektrilevi night rates apply on weekdays from 22:00–07:00 and at weekends, ex
 
 #### ``"AlwaysOnPrice": 10``
 
-Market prices are rounded to two decimal places before threshold comparison. Keep heating on when the rounded electricity market price is at or below this value (EUR/MWh), unless ``AlwaysOffPrice`` also applies.
+The hourly market average is rounded to two decimal places. Hour selection ranks prices including transfer fees; both price thresholds use the rounded market price without transfer fees. Keep heating on when the rounded electricity market price is at or below this value (EUR/MWh), unless ``AlwaysOffPrice`` also applies.
 
 #### ``"AlwaysOffPrice": 300``
 

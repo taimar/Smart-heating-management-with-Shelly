@@ -112,7 +112,7 @@ Use existing pricing and scheduling scenarios to verify cleanup. Make no unmeasu
 
 For each PR:
 
-- Run the requirement suite and mutation runner with Node 24 and `TZ=Europe/Tallinn`.
+- Run the requirement suite and mutation runner with Node 26 (pinned by `.nvmrc`), default V8 optimization, and `TZ=Europe/Tallinn`.
 - Before committing each new test batch, apply a representative one-line behavioral mutation to a temporary source copy and count failures. Require one or two named detectors; investigate zero failures or broad overlap.
 - Keep production changes and their regression tests together. Add no tests solely for cosmetic cleanup or duplicated arithmetic.
 - Update both language READMEs and the findings document with that PR’s actual behavior.

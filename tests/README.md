@@ -44,7 +44,7 @@ node tests/mutations.js
 node tests/mutations.js /path/to/SmartHeatingWithShelly.js
 ```
 
-The runner first requires a passing baseline, then mutates temporary copies of the production script and runs the suite in `Europe/Tallinn`. It checks exact replacement-match counts, imposes a 20-second timeout per run, and removes its temporary directory. The working production script is never edited. Node CLI flags are forwarded to child runs. If Node 24 on macOS arm64 exits with `SIGSEGV`, `node --no-opt tests/mutations.js` can run the same checks without V8 optimization; a crash is an error, never a successful mutation check.
+The runner first requires a passing baseline, then mutates temporary copies of the production script and runs the suite in `Europe/Tallinn`. It checks exact replacement-match counts, imposes a 20-second timeout per run, and removes its temporary directory. The working production script is never edited. Node CLI flags are forwarded to child runs. Local Node 24.21.0 on macOS arm64 intermittently exited with `SIGSEGV`, including with `--no-opt`. Use `node --jitless tests/mutations.js` to run the same checks with JIT disabled. The runtime crash root cause remains unresolved; a crash is an error, never a successful mutation check.
 
 | Outcome | Meaning |
 | --- | --- |

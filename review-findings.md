@@ -8,6 +8,8 @@ Stage 1 addresses #1, #2 and #4: JSON-era empty IDs (4.2 <= Version < 5), retrie
 
 Stage 2 addresses #3 with in-place updates and disabled-create → persist-ID → enable ordering. Zero-hour calculations retain a disabled schedule. S61–S68 exercise interruptions, restart, invalid responses, activation failure, two instances, stale watchdog writes, and already-dispatched watchdog deletion after restart. The latter is reconciled on the next five-minute tick even while prices remain fresh or fallback is active. Disabled orphans and stale/reassigned IDs remain documented boundaries. No Shelly memory or hardware measurements are available.
 
+Stage 3 addresses #5–9: provider reset, shared package keys, reused timer value, retained market prices for thresholds, and removal of only the two forecast constant mutations. Existing tariff, threshold, forecast, DST and five-minute retry scenarios remain. There is no measured memory or performance claim.
+
 ## Priority
 
 | # | Finding | Priority |

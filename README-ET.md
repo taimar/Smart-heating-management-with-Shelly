@@ -172,7 +172,7 @@ Elektrilevi öötasu kehtib tööpäeviti 22:00–07:00 ja nädalavahetusel, vä
 
 #### ``"AlwaysOnPrice": 10``
 
-Enne lävenditega võrdlemist ümardatakse börsihind kahe komakohani. Küte on sees, kui ümardatud börsihind on sellest väärtusest väiksem või sellega võrdne (EUR/MWh), välja arvatud juhul, kui rakendub ka ``AlwaysOffPrice``.
+Tunni keskmine börsihind ümardatakse kahe komakohani. Odavaimate tundide valik arvestab võrgutasusid, kuid mõlemad hinnapiirid rakenduvad ümardatud börsihinnale ilma võrgutasudeta. Küte on sees, kui ümardatud börsihind on sellest väärtusest väiksem või sellega võrdne (EUR/MWh), välja arvatud juhul, kui rakendub ka ``AlwaysOffPrice``.
 
 #### ``"AlwaysOffPrice": 300``
 

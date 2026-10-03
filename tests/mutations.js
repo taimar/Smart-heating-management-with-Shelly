@@ -8,7 +8,8 @@ const sourcePath = path.resolve(process.argv[2] || path.join(__dirname, '..', 'S
 const source = fs.readFileSync(sourcePath, 'utf8');
 const suite = path.join(__dirname, 'spec.js');
 const mutations = [
-    ['skip-periodic-schedule-reconciliation', 'S68', 'if (!(s.exSc > 0)) { calc(); return; }', 'if (true) { calc(); return; }'],
+    ['startup-check-invalidates-fresh-prices', 'S69', 'calc(); return;\n        }\n        let found', '_.tsPr = 0; calc(); return;\n        }\n        let found'],
+    ['skip-periodic-schedule-reconciliation', 'S68', 'if (!_.bootReady || !(_.bootId > 0)) { calc(); return; }', 'if (true) { calc(); return; }'],
     ['non-array-inventory-accepted', 'S63b', 'typeof res.jobs.push !== "function" || ', ''],
     ['missing-key-assumes-persisted-id', 'S67', 'function rSys(res, err, msg) {\n    _.idSaved = false;', 'function rSys(res, err, msg) {\n    _.idSaved = s.exSc > 0;'],
     ['legacy-empty-id-rejected', 'S57', 'saved.ExistingSchedule = 0;', 'saved.ExistingSchedule = "";'],

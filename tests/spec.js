@@ -69,8 +69,11 @@ const Shelly = {
         if (m === "Virtual.Add") W.addAttempts.push(p.type + ":" + p.id);
         if (W.fail[m] && (typeof W.fail[m] !== "function" || W.fail[m](p))) return done(null, -1, "forced failure");
         switch (m) {
-            case "KVS.Get": return W.kvs[p.key] !== undefined ? done({ value: W.kvs[p.key] }, 0) : done(null, -105, "not found");
-            case "KVS.set": case "KVS.Set": W.kvsWrites.push(p.key); W.kvs[p.key] = p.value; return done({}, 0);
+            case "KVS.Get": return W.kvs[p.key] !== undefined ? done({ value: W.kvs[p.key], etag: kvTag(W.kvs[p.key]) }, 0) : done(null, -105, "not found");
+            case "KVS.set": case "KVS.Set": {
+                if (p.etag !== undefined && (W.kvs[p.key] === undefined || p.etag !== kvTag(W.kvs[p.key]))) return done(null, -1, "etag mismatch");
+                W.kvsWrites.push(p.key); W.kvs[p.key] = p.value; return done({ etag: kvTag(p.value) }, 0);
+            }
             case "HTTP.GET": { W.lastUrl = p.url; const r = W.http(p); return done(r[0], r[1], ""); }
             case "Switch.SetConfig": W.relayConfigs.push(p.config); W.relayConfig = Object.assign({}, p.config); return done({}, 0);
             case "Schedule.Delete": {
@@ -81,9 +84,9 @@ const Shelly = {
             case "Schedule.Create": {
                 const id = W.nextId++;
                 W.schedules.push({ id, enable: p.enable, timespec: p.timespec, calls: p.calls });
-                return done({ id }, 0);
+                return done(W.createResponse === undefined ? { id } : W.createResponse, 0);
             }
-            case "Schedule.List": return done({ jobs: W.schedules.map(s => Object.assign({}, s)) }, 0);
+            case "Schedule.List": return done(W.listResponse === undefined ? { jobs: W.schedules.map(s => Object.assign({}, s)) } : W.listResponse, 0);
             case "Schedule.Update": {
                 const job = W.schedules.find(s => s.id === p.id);
                 if (!job) return done(null, -105, "no such schedule");
@@ -155,10 +158,27 @@ function boot(explicitStepping, options = {}) {
     const autoDrain = !explicitStepping;
     const world = W, queue = [], timers = new Map();
     let now = 0, nextTimer = 0, rpcCount = 0, rpcPeak = 0, timerPeak = 0;
-    const asyncShelly = Object.assign({}, Shelly, { call: (m, p, cb, ud) => {
-        rpcCount++; rpcPeak = Math.max(rpcPeak, rpcCount);
-        queue.push({ method: m, at: now + 10, run: () => { rpcCount--; Shelly.call(m, p, cb, ud); } });
-    } });
+    const scriptId = options.scriptId ?? 1;
+    let active = true;
+    W.running[scriptId] = true;
+    const asyncShelly = Object.assign({}, Shelly, {
+        getCurrentScriptId: () => scriptId,
+        getComponentConfig: (name, id) => name === "script" && id === scriptId
+            ? { enable: W.scriptEnabled[id] ?? true } : Shelly.getComponentConfig(name, id),
+        getComponentStatus: (name, id) => name === "script" && id === scriptId
+            ? { running: active, mem_used: 1, mem_peak: 2 } : Shelly.getComponentStatus(name, id),
+        call: (method, params, cb, data) => {
+            rpcCount++; rpcPeak = Math.max(rpcPeak, rpcCount);
+            queue.push({ method, params, at: now + 10, run: () => {
+                Shelly.call(method, params, (res, err, msg) => {
+                    if (!cb) { rpcCount--; return; }
+                    queue.push({ method: method + ":callback", at: now, run: () => {
+                        rpcCount--; cb(res, err, msg, data);
+                    } });
+                });
+            } });
+        },
+    });
     const fakeTimer = {
         set: (ms, rep, cb, data) => {
             const id = ++nextTimer;
@@ -186,7 +206,7 @@ function boot(explicitStepping, options = {}) {
     const t = {
         err: null,
         drive: code => {
-            if (t.err) return;
+            if (t.err || !active) return;
             try { return vm.runInContext(code, ctx, { timeout: 3000 }); }
             catch (e) { t.err = e; return undefined; }
         },
@@ -246,6 +266,7 @@ function boot(explicitStepping, options = {}) {
         world.now = next.getTime();
         world.unixtime = world.now / 1000;
     };
+    t.stop = () => { active = false; world.running[scriptId] = false; queue.length = 0; timers.clear(); };
     t.pending = () => queue.map(e => e.method || "timer");
     runtimes.push(t);
     t.drive(SRC);
@@ -561,8 +582,8 @@ scenario("S7c complete controls recover without SystemData; missing controls pre
         const schedule = W.schedules[0];
         const relay = W.relayConfigs[0];
         check("S7c restored control, " + label + ": normal retry restores user heating hours",
-            !t.err && W.schedules.length === 1 && schedule.id !== 41 &&
-            W.deleted.indexOf(41) !== -1 && specHours(schedule.timespec) === expectedHours,
+            !t.err && W.schedules.length === 1 && schedule.id === 41 &&
+            W.deleted.indexOf(41) === -1 && specHours(schedule.timespec) === expectedHours,
             [String(t.err || ""), W.schedules]);
         check("S7c restored control, " + label + ": inverted relay settings restored",
             schedule && schedule.calls[0].params.on === false &&
@@ -685,8 +706,8 @@ function watchdogSandbox(code, w) {
                     w.kvs[params.key] = params.value; return done({ etag: kvTag(params.value) });
                 }
                 if (method === "Schedule.Delete") {
-                    if (w.failDel[params.id]) return done(null, -1);
-                    const index = w.schedules.indexOf(params.id);
+                    if (w.failDel && w.failDel[params.id]) return done(null, -1);
+                    const index = w.schedules.findIndex(job => (typeof job === "number" ? job : job.id) === params.id);
                     if (index === -1) return done(null, -103);
                     w.schedules.splice(index, 1); return done({});
                 }
@@ -694,7 +715,7 @@ function watchdogSandbox(code, w) {
             });
         },
     };
-    new Function("Shelly", "print", code)(S, (...args) => w.logs.push(args.join(" ")));
+    new Function("Shelly", "print", code)(S, (...args) => (w.logs || prints).push(args.join(" ")));
     return { fire: id => handler({ name: "script", id, delta: { running: false } }),
         step: () => { if (queue.length) queue.shift()(); },
         flush: () => { let count = 0; while (queue.length && count++ < 100) queue.shift()(); assert.equal(queue.length, 0); } };
@@ -821,8 +842,8 @@ scenario("S15 Interrupted installs pause once any controls exist; manual restora
     vcWorld(); t = boot(); t.fcTm();
     const reinstallId = W.schedules[0].id;
     W.vcs = []; t = boot(); t.fcTm();
-    check("S15 deleting all controls reinstalls defaults and replaces the recorded schedule", !t.err &&
-        completeGroup() && W.schedules.length === 1 && W.deleted.includes(reinstallId) && W.vDeleted.length === 0);
+    check("S15 deleting all controls reinstalls defaults and updates the recorded schedule", !t.err &&
+        completeGroup() && W.schedules.length === 1 && W.schedules[0].id === reinstallId && W.vDeleted.length === 0);
 });
 
 scenario("S16 A failed timer update may proceed only with a verified equivalent existing timer", () => {
@@ -869,7 +890,7 @@ scenario("S16 A failed timer update may proceed only with a verified equivalent 
         preservationLogs.some(line => line.includes("forced failure")), preservationLogs);
     delete W.fail["Switch.SetConfig"]; t.loop();
     expectSchedule(t, cheapest(EVE.normal, 24, 10, PRICE));
-    check("S16 recovered timer replaces the preserved schedule", W.deleted.includes(preservedId));
+    check("S16 recovered timer updates the preserved schedule", W.schedules[0].id === preservedId);
 });
 
 scenario("S17 Queued interrupted installation, explicit reset, and later pause respect RPC/timer limits", () => {
@@ -919,7 +940,7 @@ scenario("S18 Unsupported and missing values are never substituted or written ba
             !t.err && JSON.stringify([W.kvs, W.schedules]) === before && W.deleted.length === 0 && W.relayConfigs.length === 0 &&
             prints.slice(start).some(line => line.includes(field)), [String(t.err || ""), prints.slice(start)]);
         W.kvs.SmartHeatingConf1 = conf(); t.loop();
-        check("S18 corrected " + field + " resumes scheduling", !t.err && W.schedules.length === 1 && W.schedules[0].id !== 41);
+        check("S18 corrected " + field + " resumes scheduling", !t.err && W.schedules.length === 1 && W.schedules[0].id === 41);
     }
     for (const saved of ["invalid JSON", "null", "{}", "[]"]) {
         W = freshWorld(); W.http = priceServer(PRICE); W.kvs.SmartHeatingConf1 = saved;
@@ -1048,7 +1069,7 @@ scenario("S21 Present-but-invalid controls cannot silently select zero or stale 
             check("S21 " + key + "=" + JSON.stringify(badValue) + " preserves the last working configuration",
                 !t.err && JSON.stringify([W.kvs, W.schedules, W.vcs, W.relayConfigs]) === before, String(t.err || ""));
             control.status.value = goodValue; t.loop();
-            check("S21 restored " + key + " resumes on retry", !t.err && W.schedules.length === 1 && W.schedules[0].id !== priorId && specHours(W.schedules[0].timespec) === cheapest(EVE.normal, 12, 5, PRICE));
+            check("S21 restored " + key + " resumes on retry", !t.err && W.schedules.length === 1 && W.schedules[0].id === priorId && specHours(W.schedules[0].timespec) === cheapest(EVE.normal, 12, 5, PRICE));
         }
     }
     vcWorld(); W.vcs = controlFixture();
@@ -1104,8 +1125,10 @@ scenario("S23 Retry the same unsaved SystemData record, including ID zero, witho
                 writes.every(c => c.params.value === record) && retries.every(c => c.method === "KVS.set"),
                 [String(initialError || t.err || ""), retries.map(c => c.method)]);
             delete W.fail["KVS.set"]; t.loop(); t.flush();
+            const activatedJobs = JSON.parse(expectedJobs);
+            if (!noHeating) { activatedJobs[0].enable = true; }
             check("S23 successful persistence saves the same ID without creating another schedule",
-                !t.err && W.kvs.SmartHeatingSys1 !== undefined && JSON.parse(W.kvs.SmartHeatingSys1).ExistingSchedule === unsavedId && JSON.stringify(W.schedules) === expectedJobs,
+                !t.err && W.kvs.SmartHeatingSys1 !== undefined && JSON.parse(W.kvs.SmartHeatingSys1).ExistingSchedule === unsavedId && JSON.stringify(W.schedules) === JSON.stringify(activatedJobs),
                 [W.kvs.SmartHeatingSys1, W.schedules]);
             t.loop(); t.flush();
             check("S23 normal calculation resumes after saving, with no orphan schedule",
@@ -1114,63 +1137,53 @@ scenario("S23 Retry the same unsaved SystemData record, including ID zero, witho
     }
 });
 
-scenario("S24 Keep the old schedule and timer compatible through every failed polarity-transition step", () => {
-    let t;
-    // Observe safety after every RPC; valid implementations may use different RPC orders.
+scenario("S24 Polarity transitions never enable a command without its matching end timer", () => {
     for (const inverted of [false, true]) {
-        for (const failStep of ["Schedule.List", "Schedule.Update", "Switch.SetConfig", "Schedule.Delete", "Schedule.Create", null]) {
+        for (const failure of ["list", "disable", "timer", "update", null]) {
             W = freshWorld(); W.kvs.SmartHeatingConf1 = conf({ InvertedRelay: inverted }); W.http = priceServer(PRICE);
-            t = boot(true); t.fcTm(); t.flush();
-            const oldId = W.schedules[0].id, oldTimer = JSON.stringify(W.relayConfig);
-            const oldEndTimer = inverted ? "auto_on" : "auto_off";
+            const runtime = boot(true); runtime.fcTm(); runtime.flush();
+            const id = W.schedules[0].id, oldTimer = JSON.stringify(W.relayConfig);
             let mismatches = 0;
             W.observe = () => {
-                const old = W.schedules.find(s => s.id === oldId);
-                if (old && old.enable && !W.relayConfig[oldEndTimer]) mismatches++;
+                for (const job of W.schedules) {
+                    const on = job.calls[0].params.on;
+                    if (job.enable && !(on ? W.relayConfig.auto_off : W.relayConfig.auto_on)) mismatches++;
+                }
             };
             W.kvs.SmartHeatingConf1 = conf({ InvertedRelay: !inverted });
-            if (failStep) W.fail[failStep] = true;
-            t.jumpToNextDay(); t.loop();
-            const limits = t.flush();
-            const beforeDisable = failStep === "Schedule.List" || failStep === "Schedule.Update";
-            const active = W.schedules.filter(s => s.enable);
-            const old = W.schedules.find(s => s.id === oldId);
-            const expectedState = beforeDisable
-                ? old && old.enable && JSON.stringify(W.relayConfig) === oldTimer
-                : failStep ? active.length === 0 : active.length === 1 && active[0].id !== oldId && active[0].calls[0].params.on === inverted;
-            check("S24 " + inverted + " -> " + !inverted + ", " + (failStep || "success") + ": old schedule never loses its end timer while enabled",
-                !t.err && mismatches === 0 && expectedState && limits.rpcPeak <= 5 && limits.timerPeak <= 5,
-                [String(t.err || ""), mismatches, W.schedules, W.relayConfig]);
-            if (failStep) {
-                delete W.fail[failStep]; t.loop(); t.flush();
-                check("S24 " + failStep + " recovers on retry with only the new-polarity schedule",
-                    !t.err && mismatches === 0 && W.schedules.length === 1 && W.schedules[0].enable && W.schedules[0].calls[0].params.on === inverted,
-                    [String(t.err || ""), W.schedules]);
-            }
+            if (failure === "list") W.fail["Schedule.List"] = true;
+            if (failure === "disable") W.fail["Schedule.Update"] = p => p.enable === false;
+            if (failure === "timer") W.fail["Switch.SetConfig"] = true;
+            if (failure === "update") W.fail["Schedule.Update"] = p => p.timespec !== undefined;
+            runtime.jumpToNextDay(); runtime.loop(); const limits = runtime.flush();
+            assert.ifError(runtime.err); assert.equal(mismatches, 0, String(failure));
+            assert.equal(W.schedules.length, 1); assert.equal(W.schedules[0].id, id);
+            const beforeDisable = failure === "list" || failure === "disable";
+            assert.equal(W.schedules[0].enable, !failure || beforeDisable, String(failure));
+            if (beforeDisable) assert.equal(JSON.stringify(W.relayConfig), oldTimer);
+            W.fail = {}; runtime.loop(); runtime.flush();
+            assert.equal(mismatches, 0); assert.equal(W.schedules[0].enable, true);
+            assert.equal(W.schedules[0].id, id); assert.equal(W.schedules[0].calls[0].params.on, inverted);
+            assert.ok(limits.rpcPeak <= 5 && limits.timerPeak <= 5);
         }
     }
-    // A restart after disabling must not re-enable the incompatible schedule.
     W = freshWorld(); W.kvs.SmartHeatingConf1 = conf(); W.http = priceServer(PRICE);
-    t = boot(true); t.fcTm(); t.flush();
-    W.kvs.SmartHeatingConf1 = conf({ InvertedRelay: true }); W.fail["Schedule.Delete"] = true;
-    t.jumpToNextDay(); t.loop(); t.flush();
-    const disabledId = W.schedules[0].id;
-    t = boot(true); t.fcTm(); t.flush();
-    check("S24 disabled schedule remains disabled across restart and another deletion failure", !t.err && W.schedules.length === 1 && W.schedules[0].id === disabledId && W.schedules[0].enable === false);
-    delete W.fail["Schedule.Delete"]; t.loop(); t.flush();
-    check("S24 restarted transition finishes after deletion recovers", !t.err && W.schedules.length === 1 && W.schedules[0].id !== disabledId && W.schedules[0].enable && W.schedules[0].calls[0].params.on === false);
+    let runtime = boot(); runtime.fcTm(); const id = W.schedules[0].id;
+    W.kvs.SmartHeatingConf1 = conf({ InvertedRelay: true });
+    W.fail["Schedule.Update"] = p => p.timespec !== undefined;
+    runtime.jumpToNextDay(); runtime.loop(); assert.equal(W.schedules[0].enable, false);
+    runtime.stop(); runtime = boot(); runtime.fcTm();
+    assert.equal(W.schedules[0].id, id); assert.equal(W.schedules[0].enable, false);
+    delete W.fail["Schedule.Update"]; runtime.loop();
+    assert.equal(W.schedules[0].id, id); assert.equal(W.schedules[0].enable, true);
+    assert.equal(W.schedules[0].calls[0].params.on, false);
 
-    // Ordinary same-polarity recalculation keeps the working schedule enabled if deletion fails.
-    W = freshWorld(); W.kvs.SmartHeatingConf1 = conf(); W.http = priceServer(PRICE);
-    t = boot(); t.fcTm();
-    const stableId = W.schedules[0].id;
-    W.fail["Schedule.Delete"] = true;
-    const stableStart = W.calls.length;
-    t.jumpToNextDay(); t.loop();
-    check("S24 same polarity does not disable the working schedule", !t.err && W.schedules[0].id === stableId && W.schedules[0].enable && !W.calls.slice(stableStart).some(c => c.method === "Schedule.Update"));
-    delete W.fail["Schedule.Delete"]; t.loop();
-    expectSchedule(t, cheapest(EVE.normal, 24, 10, PRICE));
-    check("S24 recovered deletion replaces the old schedule", W.deleted.includes(stableId));
+    const working = JSON.stringify(W.schedules);
+    W.fail["Schedule.Update"] = true; runtime.jumpToNextDay(); runtime.loop();
+    assert.equal(JSON.stringify(W.schedules), working, "same-polarity failure retains the working schedule");
+    delete W.fail["Schedule.Update"]; runtime.loop();
+    expectSchedule(runtime, cheapest(EVE.normal, 24, 10, PRICE), { inverted: true });
+    assert.equal(W.schedules[0].id, id);
 });
 
 scenario("S25 A periodic tick cannot overlap an unfinished offline fallback", () => {
@@ -1198,7 +1211,7 @@ scenario("S25 A periodic tick cannot overlap an unfinished offline fallback", ()
 
 scenario("S26 Unreadable schedule identity never becomes an empty record", () => {
     let t;
-    // Assert external state, including deletion of the old schedule. Missing-key
+    // Assert external state, including retention of the old schedule. Missing-key
     // recovery exposes a lost remembered ID that restoring the record would mask.
     for (const [priorSuccess, recovery] of [[false, "missing"], [true, "restored"], [true, "missing"]]) {
         for (const bad of ["read failure", "{", "null", "[]", "{}", '{"ExistingSchedule":null}', '{"ExistingSchedule":-1}', '{"ExistingSchedule":"5"}']) {
@@ -1220,8 +1233,7 @@ scenario("S26 Unreadable schedule identity never becomes an empty record", () =>
             const oldId = W.schedules[0] && W.schedules[0].id;
             t.loop(); t.flush();
             check("S26 " + recovery + " record resumes " + bad + "/" + priorSuccess, !t.err && W.schedules.length === 1 &&
-                (!priorSuccess || W.deleted.includes(oldId)) &&
-                W.schedules[0].id !== oldId && specHours(W.schedules[0].timespec) === cheapest(EVE.normal, 24, 2, PRICE) &&
+                (!priorSuccess || W.schedules[0].id === oldId) && specHours(W.schedules[0].timespec) === cheapest(EVE.normal, 24, 2, PRICE) &&
                 JSON.parse(W.kvs.SmartHeatingSys1).ExistingSchedule === W.schedules[0].id);
         }
     }
@@ -1372,7 +1384,7 @@ scenario("S36 Unavailable entries and values preserve heating and advise retry b
         delete W.hiddenStatusKey; control.status = status;
         t.loop(); t.flush();
         check("S36 " + fault + " recovers after a complete read", !t.err && W.schedules.length === 1 &&
-            JSON.stringify(W.schedules) !== JSON.stringify(JSON.parse(before)[2]));
+            JSON.stringify(W.kvs) !== JSON.stringify(JSON.parse(before)[0]) && W.schedules[0].enable === true);
     }
 });
 
@@ -1394,7 +1406,7 @@ scenario("S36b Numeric totals are required even for a single page with all nine 
                 prints.slice(logStart).some(l => l.includes("Schedule updates are paused") && /inventory.*incomplete/i.test(l)));
             delete W.componentTotal; t.loop(); t.flush();
             check("S36b valid total resumes " + (installed ? "normal reads" : "installation"), !t.err &&
-                completeGroup() && W.schedules.length === 1 && JSON.stringify(W.schedules) !== JSON.stringify(JSON.parse(before)[2]));
+                completeGroup() && W.schedules.length === 1 && JSON.stringify(W.kvs) !== JSON.stringify(JSON.parse(before)[0]) && W.schedules[0].enable === true);
         }
     }
 });
@@ -1491,15 +1503,15 @@ scenario("S42 Price-only mode cannot derive historical heating hours; preserve t
                 W.schedules.length === 1 && specHours(W.schedules[0].timespec) === "0,1" && W.schedules[0].calls[0].params.on === !inverted);
             W.http = priceServer(() => 100); t.jumpToNextDay(); t.loop(); t.flush();
             check("S42 valid prices can still stop threshold-only heating, inverted=" + inverted + ", prior=" + prior, !t.err &&
-                W.schedules.length === 0 && JSON.parse(W.kvs.SmartHeatingSys1).ExistingSchedule === 0);
+                W.schedules.length === 1 && !W.schedules[0].enable && JSON.parse(W.kvs.SmartHeatingSys1).ExistingSchedule === W.schedules[0].id);
         }
     }
     W = freshWorld(); W.http = () => [null, -114]; W.kvs.SmartHeatingConf1 = conf({ TimePeriod: 12, HeatingTime: 0, AlwaysOnPrice: -1 });
     W.kvs.SmartHeatingSys1 = JSON.stringify({ ExistingSchedule: 41, Version: 5 });
     W.schedules = [{ id: 41, enable: true, timespec: "0 0 1 * * *", calls: [{ method: "Switch.Set", params: { id: 0, on: true } }] }];
     t = boot(true); t.fcTm(); t.flush();
-    check("S42 an explicit zero-hour timed fallback still removes prior heating", !t.err && W.schedules.length === 0 &&
-        W.deleted.includes(41) && JSON.parse(W.kvs.SmartHeatingSys1).ExistingSchedule === 0);
+    check("S42 an explicit zero-hour timed fallback disables prior heating", !t.err && W.schedules.length === 1 &&
+        !W.schedules[0].enable && W.schedules[0].id === 41 && JSON.parse(W.kvs.SmartHeatingSys1).ExistingSchedule === 41);
 });
 
 scenario("S43 Non-string device app identifiers do not crash capability detection", () => {
@@ -1540,7 +1552,7 @@ scenario("N1 Fresh installation preserves foreign controls and respects RPC/time
         check("N1 empty slots, SystemData=" + hasSystemData + ": install defaults and schedule heating", !t.err &&
             completeGroup() && Object.keys(CONTROL_DEFAULTS).every(key =>
                 W.vcs.find(v => v.key === key)?.status.value === CONTROL_DEFAULTS[key]) &&
-            W.schedules.length === 1 && (!hasSystemData || W.deleted.includes(41)) &&
+            W.schedules.length === 1 && (!hasSystemData || W.schedules[0].id === 41) &&
             JSON.parse(W.kvs.SmartHeatingSys1).ExistingSchedule === W.schedules[0].id);
         check("N1 fresh install, SystemData=" + hasSystemData + ": preserves foreign controls within RPC/timer limits",
             !t.err && JSON.stringify(W.vcs.slice(0, 4)) === foreignBefore && W.vDeleted.length === 0 &&
@@ -1681,33 +1693,31 @@ for (const outcome of ["KVS", "virtual", "missing configuration", "failed config
         } else {
             assert.equal(paused.length, 0);
             assert.equal(W.schedules.length, 1);
-            assert.ok(W.deleted.includes(41), "successful reads replace the recorded schedule");
+            assert.equal(W.schedules[0].id, 41, "successful reads update the recorded schedule");
         }
     });
 }
 
-scenario("S46 Persist the create result (or zero) only after schedule work finishes", () => {
-    let t;
+scenario("S46 Record a new schedule attempt after creation, including failed and empty results", () => {
     for (const outcome of ["created", "failed", "empty"]) {
-        W = freshWorld(); existingHeating(); W.http = priceServer(PRICE);
+        W = freshWorld(); W.http = priceServer(PRICE);
         W.kvs.SmartHeatingConf1 = conf(outcome === "empty" ? { HeatingTime: 0, AlwaysOnPrice: -999 } : {});
         if (outcome === "failed") W.fail["Schedule.Create"] = true;
-        t = boot(true); t.fcTm();
+        const runtime = boot(true); runtime.fcTm();
         let steps = 0;
         const pending = outcome === "empty" ? "KVS.set" : "Schedule.Create";
-        while (!t.pending().includes(pending) && !t.err && steps++ < 100) t.step();
-        check("S46 " + outcome + ": no SystemData write before schedule work completes", !t.err &&
-            t.pending().includes(pending) && !W.kvsWrites.includes("SmartHeatingSys1") && W.deleted.includes(41));
-        t.loop(); t.flush();
+        while (!runtime.pending().includes(pending) && !runtime.err && steps++ < 250) runtime.step();
+        assert.ok(runtime.pending().includes(pending));
+        assert.equal(W.kvsWrites.includes("SmartHeatingSys1"), false);
+        runtime.loop(); runtime.flush(); assert.ifError(runtime.err);
         const saved = JSON.parse(W.kvs.SmartHeatingSys1);
-        check("S46 " + outcome + ": saves the resulting ID and version 5 once", !t.err &&
-            saved.ExistingSchedule === (outcome === "created" ? W.schedules[0]?.id : 0) && saved.Version === 5 &&
-            W.schedules.length === (outcome === "created" ? 1 : 0) &&
-            W.kvsWrites.filter(k => k === "SmartHeatingSys1").length === 1);
+        assert.equal(saved.ExistingSchedule, outcome === "created" ? W.schedules[0].id : 0);
+        assert.equal(saved.Version, 5); assert.ok(saved.LastCalculation);
+        assert.equal(W.schedules.length, outcome === "created" ? 1 : 0);
+        assert.equal(W.kvsWrites.filter(k => k === "SmartHeatingSys1").length, 1);
         if (outcome === "failed") {
-            delete W.fail["Schedule.Create"]; t.loop(); t.flush();
-            check("S46 failed creation retries on the next tick", !t.err && W.schedules.length === 1 &&
-                JSON.parse(W.kvs.SmartHeatingSys1).ExistingSchedule === W.schedules[0].id);
+            delete W.fail["Schedule.Create"]; runtime.loop(); runtime.flush();
+            expectSchedule(runtime, cheapest(EVE.normal, 24, 10, PRICE));
         }
     }
 });
@@ -1882,7 +1892,7 @@ scenario("S53 price outage retries at five minutes, never early, then recovers",
     const limits = runtime.advanceBy(501);
     expectSchedule(runtime, cheapest(EVE.normal, 24, 10, PRICE2));
     assert.equal(W.calls.filter(c => c.method === "HTTP.GET").length, 2, "one retry at five minutes");
-    assert.ok(W.deleted.includes(fallbackId), "successful retry replaces fallback");
+    assert.equal(W.schedules[0].id, fallbackId, "successful retry updates fallback in place");
     assert.ok(limits.rpcPeak <= 5 && limits.timerPeak <= 5, "device resource limits");
 });
 scenario("S53 local failure retries on consecutive five-minute ticks", () => {
@@ -2083,6 +2093,122 @@ scenario("S60 watchdog cannot clear newer records or clean up a restarted script
         w.running[1] = true; sb.flush();
         assert.deepEqual(w.schedules, [71, 72], name + " restarted script");
     }
+});
+
+function stopBeforeCallback(runtime, method) {
+    let steps = 0;
+    while (!runtime.pending().includes(method + ":callback") && !runtime.err && steps++ < 250) runtime.step();
+    assert.ifError(runtime.err);
+    assert.ok(runtime.pending().includes(method + ":callback"), "device completed " + method);
+    runtime.stop();
+}
+scenario("S61 interrupted creation never leaves a newly enabled unrecorded job", () => {
+    for (const checkpoint of ["Schedule.Create", "KVS.set", "Schedule.Update"]) {
+        W = freshWorld(); W.kvs.SmartHeatingConf1 = conf(); W.http = priceServer(PRICE);
+        let unrecorded = false;
+        W.observe = () => {
+            const saved = JSON.parse(W.kvs.SmartHeatingSys1 || "{}").ExistingSchedule;
+            if (W.schedules.some(job => job.enable && job.id !== saved)) unrecorded = true;
+        };
+        let runtime = boot(true); runtime.fcTm(); stopBeforeCallback(runtime, checkpoint);
+        const firstId = W.schedules[0].id;
+        assert.equal(unrecorded, false, checkpoint + " persists before enabling");
+        W.observe = null;
+        runtime = boot(true); runtime.fcTm(); runtime.flush();
+        const enabled = W.schedules.filter(job => job.enable);
+        assert.equal(enabled.length, 1, checkpoint);
+        assert.equal(JSON.parse(W.kvs.SmartHeatingSys1).ExistingSchedule, enabled[0].id);
+        assert.equal(W.schedules.length, checkpoint === "Schedule.Create" ? 2 : 1);
+        assert.equal(W.schedules.find(job => job.id === firstId).enable, checkpoint !== "Schedule.Create");
+    }
+});
+scenario("S62 zero-hour days and restarts retain the recorded schedule ID", () => {
+    W.kvs.SmartHeatingConf1 = conf(); W.http = priceServer(PRICE);
+    let runtime = boot(); runtime.fcTm(); const id = W.schedules[0].id;
+    W.kvs.SmartHeatingConf1 = conf({ HeatingTime: 0 });
+    runtime.jumpToNextDay(); runtime.loop();
+    assert.equal(W.schedules.length, 1); assert.equal(W.schedules[0].id, id);
+    assert.equal(W.schedules[0].enable, false);
+    assert.equal(JSON.parse(W.kvs.SmartHeatingSys1).ExistingSchedule, id);
+    runtime.stop(); runtime = boot(); runtime.fcTm();
+    assert.equal(W.schedules[0].id, id); assert.equal(W.schedules[0].enable, false);
+    W.kvs.SmartHeatingConf1 = conf({ HeatingTime: 2 }); runtime.jumpToNextDay(); runtime.loop();
+    expectSchedule(runtime, cheapest(EVE.normal, 24, 2, PRICE)); assert.equal(W.schedules[0].id, id);
+    assert.equal(W.calls.filter(c => c.method === "Schedule.Create").length, 1);
+    assert.equal(W.calls.filter(c => c.method === "Schedule.Delete").length, 0);
+});
+scenario("S63 failed activation retries the persisted ID", () => {
+    W.kvs.SmartHeatingConf1 = conf(); W.http = priceServer(PRICE);
+    W.fail["Schedule.Update"] = p => p.enable === true;
+    const runtime = boot(true); runtime.advanceBy(1500);
+    assert.ifError(runtime.err); assert.equal(W.schedules.length, 1);
+    const id = W.schedules[0].id;
+    assert.equal(W.schedules[0].enable, false);
+    assert.equal(JSON.parse(W.kvs.SmartHeatingSys1).ExistingSchedule, id);
+    delete W.fail["Schedule.Update"]; runtime.advanceBy(300000);
+    expectSchedule(runtime, cheapest(EVE.normal, 24, 10, PRICE)); assert.equal(W.schedules[0].id, id);
+});
+scenario("S63a invalid create IDs leave only disabled jobs", () => {
+    for (const response of [null, {}, { id: 0 }, { id: -1 }, { id: 1.5 }, { id: "5" }]) {
+        W = freshWorld(); W.kvs.SmartHeatingConf1 = conf(); W.http = priceServer(PRICE); W.createResponse = response;
+        const runtime = boot(); runtime.fcTm();
+        assert.ifError(runtime.err); assert.equal(W.schedules.length, 1);
+        assert.equal(W.schedules[0].enable, false);
+        assert.equal(JSON.parse(W.kvs.SmartHeatingSys1).ExistingSchedule, 0);
+    }
+});
+scenario("S63b malformed schedule inventories cannot authorize replacement", () => {
+    for (const response of [null, {}, { jobs: {} }, { jobs: { length: 0 } }, { jobs: "" }, { jobs: [null] }]) {
+        W = freshWorld(); existingHeating(); W.kvs.SmartHeatingConf1 = conf(); W.http = priceServer(PRICE); W.listResponse = response;
+        const before = JSON.stringify([W.schedules, W.kvs, W.relayConfig]);
+        const runtime = boot(); runtime.fcTm();
+        assert.ifError(runtime.err); assert.equal(JSON.stringify([W.schedules, W.kvs, W.relayConfig]), before);
+    }
+});
+scenario("S64 delayed watchdog clearing cannot erase a restarted instance's ID", () => {
+    W.kvs.SmartHeatingConf1 = conf(); W.http = priceServer(PRICE);
+    let runtime = boot(); runtime.fcTm(); runtime.stop();
+    const watchdog = watchdogSandbox(watchdogCopies[1][1], W);
+    watchdog.fire(1); watchdog.step(); watchdog.step();
+    runtime = boot(); runtime.fcTm(); const record = W.kvs.SmartHeatingSys1;
+    watchdog.flush(); assert.equal(W.kvs.SmartHeatingSys1, record);
+    expectSchedule(runtime, cheapest(EVE.normal, 24, 10, PRICE));
+});
+scenario("S65 restart after an in-place update reuses its recorded identity", () => {
+    W.kvs.SmartHeatingConf1 = conf(); W.http = priceServer(PRICE);
+    let runtime = boot(true); runtime.fcTm(); runtime.flush(); const id = W.schedules[0].id;
+    W.http = priceServer(PRICE2); runtime.jumpToNextDay(); runtime.loop();
+    stopBeforeCallback(runtime, "Schedule.Update");
+    runtime = boot(); runtime.fcTm();
+    expectSchedule(runtime, cheapest(EVE.normal, 24, 10, PRICE2)); assert.equal(W.schedules[0].id, id);
+});
+scenario("S66 two instances sharing a relay retain independent schedules", () => {
+    W.kvs.SmartHeatingConf1 = conf(); W.kvs.SmartHeatingConf2 = conf(); W.http = priceServer(PRICE);
+    const first = boot(true), second = boot(true, { scriptId: 2 });
+    first.fcTm(); second.fcTm(); first.flush(); second.flush();
+    assert.ifError(first.err); assert.ifError(second.err);
+    const id1 = JSON.parse(W.kvs.SmartHeatingSys1).ExistingSchedule;
+    const id2 = JSON.parse(W.kvs.SmartHeatingSys2).ExistingSchedule;
+    const other = JSON.stringify(W.schedules.find(s => s.id === id2));
+    assert.notEqual(id1, id2);
+    W.kvs.SmartHeatingConf1 = conf({ HeatingTime: 2 }); first.jumpToNextDay(); first.loop(); first.flush();
+    assert.equal(JSON.stringify(W.schedules.find(s => s.id === id2)), other);
+    assert.equal(JSON.parse(W.kvs.SmartHeatingSys1).ExistingSchedule, id1);
+    first.stop(); const watchdog = watchdogSandbox(watchdogCopies[1][1], W); watchdog.fire(1); watchdog.flush();
+    assert.equal(W.schedules.length, 1); assert.equal(W.schedules[0].id, id2);
+});
+
+scenario("S67 a remembered ID is persisted again before reactivation after key deletion", () => {
+    W.kvs.SmartHeatingConf1 = conf(); W.http = priceServer(PRICE);
+    const runtime = boot(); runtime.fcTm(); const id = W.schedules[0].id;
+    delete W.kvs.SmartHeatingSys1;
+    W.fail["KVS.set"] = p => p.key === "SmartHeatingSys1";
+    runtime.jumpToNextDay(); runtime.loop();
+    assert.ifError(runtime.err); assert.equal(W.schedules.length, 1);
+    assert.equal(W.schedules[0].id, id); assert.equal(W.schedules[0].enable, false);
+    delete W.fail["KVS.set"]; runtime.loop();
+    assert.equal(JSON.parse(W.kvs.SmartHeatingSys1).ExistingSchedule, id);
+    assert.equal(W.schedules[0].enable, true);
 });
 
 const options = process.argv.slice(3);

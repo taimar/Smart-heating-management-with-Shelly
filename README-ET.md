@@ -70,17 +70,17 @@ Skript kasutab üht ajakava, mis sisaldab kõiki valitud küttetunde.
 | --- | --- |
 | <img src="images/oneschedule.jpg" alt="Ava ajakava" width="200"> | <img src="images/editschedule.jpg" alt="Muuda küttetunde" width="200"> |
 
-Tundide käsitsi lisamiseks või eemaldamiseks klõpsa neile ja vali **Next → Next → Save**. Muudatused kehtivad kuni skript asendab ajakava järgmise arvutuse järel.
+Tundide käsitsi lisamiseks või eemaldamiseks klõpsa neile ja vali **Next → Next → Save**. Muudatused kehtivad kuni skript uuendab ajakava järgmise arvutuse järel.
 
 Seadme veebilehel **Advanced → KVS** asub üks JSON-kirje `SmartHeatingSys<ScriptId>`, näiteks `SmartHeatingSys1` skripti ID 1 jaoks:
 
 | Väli | Tähendus |
 | --- | --- |
-| `ExistingSchedule` | Skripti ajakava salvestatud ID; `0` tähendab, et ajakava pole salvestatud. |
+| `ExistingSchedule` | Skripti aktiivse või välja lülitatud ajakava salvestatud ID; `0` tähendab, et ajakava pole salvestatud. |
 | `LastCalculation` | Viimase salvestatud ajastamistulemuse ajatempel. |
 | `Version` | Kirje salvestanud kütteskripti versioon. |
 
-`LastCalculation` märgib hinnapõhise ajakava, varuajakava, küttetundideta tulemuse või ajakava loomise ebaõnnestumise aega. Salvestamise korduskatsetel ajatempel ei muutu: see näitab tulemuse, mitte hilisema salvestamise aega. See ei kinnita edukat hindade päringut ega tegelikku kütmist.
+`LastCalculation` märgib hinnapõhise ajakava, varuajakava, küttetundideta tulemuse või ajakava loomise ebaõnnestumise aega. Salvestamise korduskatsetel ajatempel ei muutu: see näitab tulemuse, mitte hilisema salvestamise aega. See ei kinnita edukat hindade päringut, ajakava aktiveerimist ega tegelikku kütmist.
 
 Pärast kütte ajakava edukat kustutamist seab watchdog tingimusliku kirjutamisega `ExistingSchedule` väärtuseks `0`, jättes `LastCalculation` muutmata. Kui teine arvutus on kirjet muutnud või KVS ei tagasta `etag` väärtust, jääb kirje puutumata. Vigane JSON või ajakava ID logitakse, kuid teiste skriptide ajakavade puhastamine jätkub. Hilinenud kustutamine jäetakse vahele, kui kütteskript kontrolli hetkel juba töötab.
 
@@ -221,7 +221,11 @@ Kui katkenud paigalduse järel on osa juhtkomponente puudu, ei taasta korduskats
 
 **„Group setup incomplete”** tähendab, et grupp vajab käsitsi seadistamist; kütte juhtimine saab jätkuda. Olemasoleva grupi nimi ja liikmed säilivad. Vajadusel loo grupp või lisa juhtkomponendid sinna käsitsi, ka siis, kui grupp jäi taaskäivituse tõttu puudu või tühjaks. Kui kõik juhtkomponendid on olemas, ei proovita gruppi järgmistel arvutustel ega taaskäivitustel uuesti seadistada.
 
-SystemData kirjutamisvea korral proovitakse sama kirjet salvestada enne järgmist arvutust. Taaskäivitus või voolukatkestus enne õnnestunud salvestamist võib jätta ajakava ID salvestamata. Skript haldab ajakava salvestatud ID järgi ega otsi või taasta omanikuta ajakavasid. Relee polaarsuse muutmise ebaõnnestumisel võib varasem ajakava jääda välja lülitatuks kuni järgmise õnnestunud katseni.
+Skript uuendab salvestatud ajakava sama ID-ga. Kui küttetunde pole, lülitab skript ajakava välja ja säilitab selle ID hilisemaks kasutamiseks; esmane küttetundideta arvutus ajakava ei loo. Uus ajakava luuakse välja lülitatuna ja aktiveeritakse alles pärast ID salvestamist. SystemData kirjutamisvea korral proovitakse sama kirjet salvestada enne järgmist arvutust. Aktiveerimisvea korral säilib ID ja uus katse tehakse viie minuti pärast. Relee polaarsuse muutmise ebaõnnestumisel võib varasem ajakava jääda välja lülitatuks kuni järgmise õnnestunud katseni.
+
+Taaskäivitus või voolukatkestus enne uue ID salvestamist võib jätta alles salvestamata ID-ga **välja lülitatud** ajakava, mis hõivab ühe ajakava koha. Enne selle käsitsi kustutamist võrdle seadme ajakavasid ja SystemData kirjeid. Varem tekkinud salvestamata ID-ga aktiivseid ajakavasid automaatselt ei parandata. Skript ei otsi ega võta ajakavasid üle tundide või releekäskude sarnasuse põhjal.
+
+Salvestatud ID on haldamise alus, kuid ei tõenda omandiõigust, kui ID on teisele ajakavale uuesti antud. Enne taaskäivitamist vii aegunud ID käsitsi vastavusse seadme tegelike ajakavadega. Uuenda kõiki sama watchdog'i kasutavaid kütteskripte koos: vanem skript võib paigaldada watchdog'i vanema koodi.
 
 # Kuidas seda skripti installida
 
@@ -288,7 +292,7 @@ flowchart TD
 
 ## Testitud rikkestsenaariumid
 
-- Kui ajaperioodiga režiimis ei saa hindu või vajalikku ilmaprognoosi, koostab skript iga perioodi jaoks varuajakava ajaloolise hinnajärjestuse ja `HeatingTime` alusel. Valik piirdub selle perioodi tundidega. Väärtus `HeatingTime: 0` eemaldab sel juhul kütte ajakava.
+- Kui ajaperioodiga režiimis ei saa hindu või vajalikku ilmaprognoosi, koostab skript iga perioodi jaoks varuajakava ajaloolise hinnajärjestuse ja `HeatingTime` alusel. Valik piirdub selle perioodi tundidega. Väärtus `HeatingTime: 0` lülitab sel juhul olemasoleva ajakava välja ja säilitab selle ID; puuduva ajakava asemele uut ei looda.
 - Ainult hinnapiiridel põhinevas režiimis (`TimePeriod: 0`) peatub hindade puudumisel ajakava uuendamine. Olemasolev ajakava ja releeseaded säilivad; varuajakava ei kasutata.
 - Konfiguratsiooni või SystemData lugemisvea korral väljastatakse **„Schedule updates are paused”**. Juhtkomponendid, releeseaded ja ajakava jäävad muutmata.
 - Voolukatkestuse järel ootab skript seadme kellaaega umbes 30 sekundit. Kui kellaaega ikka pole, kasutab ajaperioodiga režiim ülaltoodud varuajakava; ainult hinnapiiridel põhinev režiim peatab uuendamise.

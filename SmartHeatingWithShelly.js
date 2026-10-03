@@ -113,7 +113,9 @@ let _ = {
     updD: Math.floor(Math.random() * 46),           //delay for server requests (max 45min)
     sId: Shelly.getCurrentScriptId(),               //script ID
     pId: "Id" + Shelly.getCurrentScriptId() + ": ", //print ID
-    sysPending: false, //new schedule ID still needs to be saved
+    sysPending: false, //schedule record still needs to be saved
+    actPending: false, //activation waits for successful persistence
+    idSaved: false,    //current schedule identity is present in KVS
     manu: false,    //manual heating flag
     prov: "None",   //network provider name
     newV: 5,      //new script version
@@ -365,6 +367,7 @@ function rConf(res, err, msg) {
 }
 
 function rSys(res, err, msg) {
+    _.idSaved = false;
     // A deleted key does not erase the schedule ID already known this boot.
     if (err === -105) { _.sdOk = true; return; }
     if (err !== 0 || !res) { print(_.pId, "SystemData read failed:", err, msg); return; }
@@ -378,6 +381,7 @@ function rSys(res, err, msg) {
             print(_.pId, "Invalid SystemData: ExistingSchedule must be a non-negative integer."); return;
         }
         s.exSc = saved.ExistingSchedule;
+        _.idSaved = s.exSc > 0;
         _.sdOk = true;
     } catch (e) { print(_.pId, "SystemData is not valid JSON; restore the record with the correct schedule ID."); }
 }
@@ -794,7 +798,7 @@ function gEle() {
         p = null;
         raw = null;
         _.manu = false;
-        fTmr(eler); //set the fail-safe timer before replacing the existing schedule
+        fTmr(eler); //set the fail-safe timer before updating the schedule
         eler = null;
     });
 }
@@ -863,14 +867,20 @@ function fFee(epoch, p) {
 
 // Check the old schedule's actual relay command before changing its timer.
 function fTmr(eler) {
-    if (!(s.exSc > 0)) { sTmr(eler); return; }
+    if (!(s.exSc > 0)) { if (eler.length) { sTmr(eler); } else { fScd(eler); } return; }
     Shelly.call("Schedule.List", null, function (res, err, msg, data) {
-        if (err !== 0 || !res || !res.jobs) {
+        if (err !== 0 || !res || !res.jobs || typeof res.jobs.push !== "function" || !idOk(res.jobs.length)) {
             rErr("Cannot check the existing schedule before updating its timer: " + msg); return;
+        }
+        for (let i = 0; i < res.jobs.length; i++) {
+            if (!res.jobs[i] || !idOk(res.jobs[i].id) || res.jobs[i].id === 0) {
+                rErr("Cannot check the existing schedule: invalid schedule inventory."); return;
+            }
         }
         for (let i = 0; i < res.jobs.length; i++) {
             const job = res.jobs[i];
             if (job.id !== s.exSc) { continue; }
+            if (!data.length) { fScd(data); return; }
             const call = job.calls && job.calls.length === 1 ? job.calls[0] : null;
             res = null; //release the other jobs before sending the next RPC
             if (job.enable === false || (call && call.method === "Switch.Set" && call.params &&
@@ -879,14 +889,15 @@ function fTmr(eler) {
             } else {
                 Shelly.call("Schedule.Update", { id: job.id, enable: false }, function (res, err, msg, hours) {
                     if (err !== 0) { rErr("Cannot disable the old schedule before changing relay polarity: " + msg); return; }
-                    print(_.pId, "Old schedule disabled before changing relay polarity; it will stay disabled if replacement fails.");
+                    print(_.pId, "Old schedule disabled before changing relay polarity; it will stay disabled if the update fails.");
                     sTmr(hours);
                 }, data);
             }
             return;
         }
         s.exSc = 0; //the recorded schedule is already absent
-        sTmr(data);
+        _.idSaved = false;
+        if (data.length) { sTmr(data); } else { fScd(data); }
     }, eler);
 }
 // Set countdown timer to flip Shelly status after any incompatible schedule is disabled.
@@ -911,47 +922,18 @@ function sTmr(eler) {
             }
             print(_.pId, "Relay timer update failed, but the existing timer matches; continuing.");
         }
-        fdSc(data);
+        fScd(data);
     }, eler);
 }
-// Delete the existing schedule if it exists
-function fdSc(eler) {
-    if (!(s.exSc > 0)) {
-        fScd(eler);
-        return;
-    }
-    Shelly.call("Schedule.Delete", { id: s.exSc }, function (res, err, msg, data) {
-        if (err !== 0) {
-            // A stale KVS ID is safe to replace only after confirming that no such schedule exists.
-            Shelly.call("Schedule.List", null, function (list, listErr, listMsg, old) {
-                let found = false;
-                if (listErr === 0 && list && list.jobs) {
-                    for (let i = 0; i < list.jobs.length; i++) {
-                        if (list.jobs[i].id === old.id) {
-                            found = true;
-                            break;
-                        }
-                    }
-                    if (!found) {
-                        s.exSc = 0;
-                        fScd(old.eler);
-                        return;
-                    }
-                }
-                rErr("Schedule " + old.id + " was not deleted: " + msg + ". " + listMsg);
-            }, data);
-            return;
-        }
-        s.exSc = 0;
-        fScd(data.eler);
-    }, { id: s.exSc, eler: eler });
-}
-
-// Create a new schedule with the advanced timespec to cover all the hours within the same schedule item
+// One recorded schedule covers all selected hours; new jobs stay disabled until their ID is saved.
 function fScd(eler) {
     if (eler === undefined || eler.length == 0) {
         print(_.pId, "No heating calculated for any hours with the current configuration.")
-        fKvs(0);
+        if (!(s.exSc > 0)) { fKvs(0, false); return; }
+        Shelly.call("Schedule.Update", { id: s.exSc, enable: false }, function (res, err, msg) {
+            if (err !== 0) { rErr("Cannot disable the heating schedule: " + msg); return; }
+            fKvs(s.exSc, false);
+        });
         return;
     }
     // Sort the heating by hour
@@ -967,8 +949,8 @@ function fScd(eler) {
     }
     const hrs = hArr.join(",");     //create timespec
     const pric = pArr.join(", ");   //create hours (prices) for print
-    Shelly.call("Schedule.Create", {
-        enable: true,
+    const schedule = {
+        enable: s.exSc > 0 && _.idSaved,
         timespec: "0 0 " + hrs + " * * *",
         calls: [{
             method: "Switch.Set",
@@ -977,20 +959,32 @@ function fScd(eler) {
                 on: !c.Inv
             }
         }]
-    }, function (res, err, msg) {
-        if (err !== 0) {
-            print(_.pId, "Scheduler not created:", err, msg);
-            _.tsPr = 0;
-            if (c.isFc) { _.tsFc = 0; }
-            _.manu = false;
-        }
-        fKvs(err === 0 ? res.id : 0);
-    });
-    print(_.pId, "Heating will be turned on to following hours 'HH:mm (EUR/MWh Energy Price + Transmission)':\n", pric);
+    };
+    if (s.exSc > 0) {
+        schedule.id = s.exSc;
+        Shelly.call("Schedule.Update", schedule, function (res, err, msg) {
+            if (err !== 0) { rErr("Schedule update failed: " + msg); return; }
+            fKvs(s.exSc, !_.idSaved);
+        });
+    } else {
+        Shelly.call("Schedule.Create", schedule, function (res, err, msg) {
+            if (err !== 0 || !res || !idOk(res.id) || res.id === 0) {
+                print(_.pId, "Scheduler not created or its ID could not be verified:", err, msg);
+                _.tsPr = 0;
+                if (c.isFc) { _.tsFc = 0; }
+                _.manu = false;
+                fKvs(0, false);
+                return;
+            }
+            fKvs(res.id, true);
+        });
+    }
+    print(_.pId, "Calculated heating hours 'HH:mm (EUR/MWh Energy Price + Transmission)':\n", pric);
 }
 
 // Keep the new ID in memory until it is saved; later cycles retry this write before reading stale KVS.
-function fKvs(id) {
+function fKvs(id, activate) {
+    _.actPending = activate;
     s.last = new Date().toString();
     s.exSc = id;
     _.sysPending = true;
@@ -1006,11 +1000,21 @@ function pSys() {
                 return;
             }
             _.sysPending = false;
+            _.idSaved = s.exSc > 0;
             s.last = null;
             print(_.pId, "Script v", _.newV, (s.exSc > 0 ? " saved schedule ID:" + s.exSc : " saved no heating schedule") +
                 ", next heating calculation at", nxHr(1) + (_.updD < 10 ? ":0" : ":") + _.updD);
-            f_Wd();
+            if (_.actPending) { aSc(); }
+            else { f_Wd(); }
         });
+}
+function aSc() {
+    Shelly.call("Schedule.Update", { id: s.exSc, enable: true }, function (res, err, msg) {
+        _.actPending = false;
+        if (err !== 0) { rErr("Recorded schedule could not be activated: " + msg); return; }
+        print(_.pId, "Recorded schedule activated:", s.exSc);
+        f_Wd();
+    });
 }
 
 //if the internet is not working or Elering is down
@@ -1035,7 +1039,7 @@ function fMan() {
         }
     }
     chpH = null;
-    fTmr(eler); //set the fail-safe timer before replacing the existing schedule
+    fTmr(eler); //set the fail-safe timer before updating the schedule
 }
 
 // Selection sort: ascending key, with later timestamps first when prices tie.

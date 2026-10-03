@@ -26,7 +26,7 @@ Filters match name prefixes, so `--filter=S4` also selects S40 through S49. An u
 
 Every scenario starts with a fresh world, clock, logs, and runtime list. Errors from all boots within a scenario remain recorded, including abandoned boots in restart cases. Test-side exceptions fail the scenario and allow subsequent scenarios to run. Each driven VM call has a three-second timeout.
 
-RPC callbacks and one-shot timers are queued. Use these entry points when writing scenarios:
+RPC device effects and callback delivery are separate queued events, alongside one-shot timers. `stop()` discards the stopped runtime’s callbacks and timers while preserving device schedules, KVS and relay configuration. `boot(true, { scriptId: 2 })` starts another instance against the same device world. KVS reads return content-derived etags and conditional writes reject stale values. Use these entry points when writing scenarios:
 
 - `boot()` automatically drains queued work after explicit `fcTm()` and `loop()` calls. `boot(true)` leaves execution to the scenario.
 - `step()` and `flush()` process queued RPC callbacks and one-shot timers without firing recurring timers.
@@ -44,7 +44,7 @@ node tests/mutations.js
 node tests/mutations.js /path/to/SmartHeatingWithShelly.js
 ```
 
-The runner first requires a passing baseline, then mutates temporary copies of the production script and runs the suite in `Europe/Tallinn`. It checks exact replacement-match counts, imposes a 20-second timeout per run, and removes its temporary directory. The working production script is never edited.
+The runner first requires a passing baseline, then mutates temporary copies of the production script and runs the suite in `Europe/Tallinn`. It checks exact replacement-match counts, imposes a 20-second timeout per run, and removes its temporary directory. The working production script is never edited. Node CLI flags are forwarded to child runs. If Node 24 on macOS arm64 exits with `SIGSEGV`, `node --no-opt tests/mutations.js` can run the same checks without V8 optimization; a crash is an error, never a successful mutation check.
 
 | Outcome | Meaning |
 | --- | --- |
@@ -65,3 +65,16 @@ Preserve the sentinel phrases `Schedule updates are paused`, `Missing controls`,
 ## Hardware limits
 
 Installation and concurrency scenarios assert at most five pending RPCs and five active timers. Node does not establish Shelly engine compatibility, actual cron execution, or device memory usage. Measure `mem_used` and `mem_peak` on hardware before release.
+
+
+### Device qualification checklist (outstanding)
+
+No hardware results are available for these changes. For each run, record the device model, firmware, script commit, and observed result:
+
+- Verify disabled creation → ID persistence → activation, including failed persistence and activation.
+- Interrupt stop/start and reboot after each device effect, including in-place update; inspect IDs, enabled state, and timers.
+- Exercise malformed watchdog records, overlapping stopped scripts, and stale-etag cleanup writes.
+- Record schedule ID allocation after deletion and reboot; if IDs are reused, retain the documented manual stale-ID reconciliation boundary.
+- Measure `mem_used` and `mem_peak` at the pre-change baseline, after lifecycle changes, and after pricing cleanup. Include two supported instances, failures and retries. Do not infer memory savings from Node results.
+
+New tests S61–S67 cover these recovery boundaries in the queued Node harness; they do not establish device qualification.
